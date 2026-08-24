@@ -1,0 +1,305 @@
+{
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "description": "Standard error envelope emitted by the koba HTTP adapter.",
+        "properties": {
+          "error": {
+            "description": "Lowercase HTTP status name with spaces replaced by underscores.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable explanation of the failure.",
+            "type": "string"
+          },
+          "status": {
+            "description": "HTTP status code returned by the transport.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "error",
+          "message"
+        ],
+        "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Request": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Static Fixture API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/fixtures": {
+      "post": {
+        "operationId": "createStaticFixture",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Request"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response"
+                    }
+                  ],
+                  "nullable": true
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "static-fixture"
+        ]
+      }
+    },
+    "/fixtures/ids": {
+      "put": {
+        "operationId": "replaceStaticFixtureIDs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Replace",
+        "tags": [
+          "static-fixture"
+        ]
+      }
+    },
+    "/fixtures/nil": {
+      "get": {
+        "operationId": "getNilStaticFixture",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response"
+                    }
+                  ],
+                  "nullable": true
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Nil",
+        "tags": [
+          "static-fixture"
+        ]
+      }
+    },
+    "/fixtures/{id}": {
+      "delete": {
+        "operationId": "deleteStaticFixture",
+        "parameters": [
+          {
+            "description": "Fixture ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful response"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Delete",
+        "tags": [
+          "static-fixture"
+        ]
+      },
+      "patch": {
+        "operationId": "updateStaticFixture",
+        "parameters": [
+          {
+            "description": "Fixture ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Request"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Update",
+        "tags": [
+          "static-fixture"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "description": "Reflection and generated runtime parity fixture.",
+      "name": "static-fixture"
+    }
+  ]
+}

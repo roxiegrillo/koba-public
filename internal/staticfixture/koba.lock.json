@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "serviceId": "static-fixture",
+  "generator": {
+    "module": "github.com/roxiegrillo/koba/v2/kobaapp",
+    "version": "1"
+  },
+  "artifacts": [
+    {
+      "kind": "openapi",
+      "path": "internal/staticfixture/openapi.json",
+      "sha256": "sha256:e5f83fe934936671f1f67e16bb5a7f00ad8150c8837ce5cf20af1042f6418663"
+    },
+    {
+      "kind": "static-go",
+      "path": "internal/staticfixture/zz_koba.gen.go",
+      "sha256": "sha256:27179e3099d754d7c8c9bff24ebbfcd090870682dcea5a337bd0ac4944a1da6b",
+      "buildTag": "koba_static"
+    }
+  ]
+}

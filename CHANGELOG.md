@@ -1,7 +1,12 @@
 # Changelog
 
-## 0.1.0 (2022-01-12)
+All notable changes to the Koba core are documented in this file. The
+record follows the curated conceptual line, one concept per release.
 
-### Features
+## [1.0.0] (2026-08-24)
 
-* a function is an endpoint: an API is a value whose exported methods are its operations, and the signature decides how each is called
+An API is described, not routed. Operations are declared as data, the
+execution plan is derived deterministically from that description, and
+transport artifacts are generated from the plan rather than wired by hand.
+Routing knowledge leaves the domain: the description becomes the source of
+truth that every consumer reads.

@@ -44,6 +44,64 @@ func (*Polls) Cast(request CastRequest) Receipt { ... }
   that carries the message: `{"status": 500, "error":
   "internal_server_error", "message": "..."}`.
 
+## The description
+
+The signature still defaults the verb and the status. What it cannot say, the
+API states as data, implementing `APIDocumentation`:
+
+```go
+func (*Polls) Routes() map[string]string {
+	return map[string]string{
+		"ReadLog": "/polls/:poll_id/log",
+	}
+}
+
+func (*Polls) APIDocumentation() koba.APIDocumentation {
+	return koba.APIDocumentation{
+		Operations: map[string]koba.OperationDocumentation{
+			"ReadLog": {
+				Method:        http.MethodGet,
+				SuccessStatus: http.StatusOK,
+				Parameters: []koba.ParameterDocumentation{
+					koba.ParameterOf[int]("page", koba.ParameterInQuery,
+						"The page to read.", false),
+				},
+			},
+		},
+	}
+}
+```
+
+`ReadLog` is now a `GET` with a path value and a query parameter: the route
+names `poll_id`, and the description declares the verb, the success status
+and each parameter. What no description states, the conventions above
+provide.
+
+## The plan
+
+`AddApi` no longer discovers endpoints at serving time. It compiles the
+description once into a plan: for each operation, an invoker that receives
+the request context and a way to decode a body, and knows nothing of routing.
+The router consumes the plan; the walk over the value that used to be the
+serving became a build step that produces a value.
+
+Built with the `koba_static` tag, the same plan is served from generated
+direct calls instead of reflection; both answer through one plan.
+
+## The contract
+
+The OpenAPI document is generated from the same description: route, verb,
+status and parameters are written once, and the server and the document read
+the same fact. `openapi.Mount` serves the JSON contract and a self-contained
+Swagger UI on the app's router.
+
+## The artifacts
+
+A `kobaapp.Definition` gathers the APIs of a service, its OpenAPI output and
+its static targets in one value. Its command writes the generated plan, the
+OpenAPI JSON and a lock manifest with their digests; `--check` verifies the
+committed artifacts byte for byte.
+
 ## The router
 
 The endpoints are served by `internal/httprouter`, a small router over
