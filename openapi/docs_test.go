@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/roxiegrillo/koba/v2/internal/httprouter"
+	httprouter "github.com/roxiegrillo/koba/v2/internal/httprouter"
 	fb "github.com/roxiegrillo/koba/v2"
 )
 
@@ -224,7 +224,7 @@ func TestMountJSONUsesStandardServiceEndpoints(t *testing.T) {
 }
 
 func TestMountJSONRequiresServiceTransport(t *testing.T) {
-	if _, err := MountJSON(struct{}{}, []byte(`{}`), DocsOptions{}); err == nil || !strings.Contains(err.Error(), "HTTP transport") {
+	if _, err := MountJSON(struct{}{}, []byte(`{}`), DocsOptions{}); err == nil || !strings.Contains(err.Error(), "Gin transport") {
 		t.Fatalf("MountJSON() error = %v, want missing transport error", err)
 	}
 }

@@ -3,6 +3,7 @@ package http_common
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 )
@@ -74,5 +75,45 @@ func TestQueryFromContextWithoutQuery(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("QueryFromContext returned %#v, want empty values", got)
+	}
+}
+
+func TestStandardHeadersIsEmptyByDefault(t *testing.T) {
+	if got := StandardHeaders(); len(got) != 0 {
+		t.Fatalf("StandardHeaders() = %q, want no implicit forwarding", got)
+	}
+}
+
+func TestPathParametersFromContextReturnsCopy(t *testing.T) {
+	original := map[string]string{"item_id": "item-123"}
+	ctx := context.WithValue(context.Background(), PathParameters, original)
+
+	parameters := PathParametersFromContext(ctx)
+	if got, want := parameters["item_id"], "item-123"; got != want {
+		t.Fatalf("item_id = %q, want %q", got, want)
+	}
+	parameters["item_id"] = "changed"
+	if got, want := original["item_id"], "item-123"; got != want {
+		t.Fatalf("mutating returned parameters changed context value to %q", got)
+	}
+}
+
+func TestPathParametersFromContextWithoutParameters(t *testing.T) {
+	parameters := PathParametersFromContext(context.Background())
+	if parameters == nil || len(parameters) != 0 {
+		t.Fatalf("PathParametersFromContext() = %#v, want an empty map", parameters)
+	}
+}
+
+func TestResponseWriterFromContext(t *testing.T) {
+	want := httptest.NewRecorder()
+	ctx := context.WithValue(context.Background(), ResponseWriter, http.ResponseWriter(want))
+
+	got, ok := ResponseWriterFromContext(ctx)
+	if !ok || got != want {
+		t.Fatalf("ResponseWriterFromContext() = (%T, %t), want supplied writer", got, ok)
+	}
+	if missing, ok := ResponseWriterFromContext(context.Background()); ok || missing != nil {
+		t.Fatalf("missing response writer = (%T, %t), want (nil, false)", missing, ok)
 	}
 }

@@ -95,6 +95,51 @@ status and parameters are written once, and the server and the document read
 the same fact. `openapi.Mount` serves the JSON contract and a self-contained
 Swagger UI on the app's router.
 
+The contract is also a value of its own. An API that implements
+`WithAPIContract` declares the executable boundary beside the functions:
+where each operation's request comes from, what it must satisfy, and who may
+call it.
+
+```go
+type castRequestContract struct {
+	PollID koba.Binding[string]
+	Ballot koba.BodyObjectBinding[ballotContract]
+}
+
+func (*Polls) APIContract() koba.APIContract {
+	return koba.APIContract{Operations: map[string]koba.OperationContract{
+		"Cast": {
+			Request: castRequestContract{
+				PollID: koba.Path[string]("poll_id", koba.MinLength(1)),
+				Ballot: koba.BodyObject(ballotContract{
+					Nullifier: koba.Value[string](koba.Required(), koba.MinLength(1)),
+				}, koba.Required()),
+			},
+		},
+	}}
+}
+```
+
+A binding is a typed leaf that names where a value comes from — `Path`,
+`Query`, `Header`, `Cookie`, a value inside the body, or the whole body —
+and its input carries the rules: `Required`, `Default`, `Min`, `Max`,
+lengths, `OneOf`, `Matches`. The rules are checked against themselves when
+the API is described: a minimum on a string, a default that violates its own
+constraint, a pattern that does not compile, are refused at registration,
+not at the first request.
+
+At serving time the request is built, not parsed. The compiled bindings are
+the only bridge between HTTP values and the request fields; each value is
+validated against its contract, and a violation answers `400` naming the
+field and the reason — before the function runs. The same input publishes
+its constraint to the OpenAPI document: the check the runtime enforces and
+the document the world reads are one fact with two readers.
+
+An operation may declare the scopes a caller must hold. The scopes are
+checked before the request is constructed, so an unauthorized caller learns
+nothing about the shape of the input; an operation that declares scopes when
+no authentication middleware is configured is refused when the API is added.
+
 ## The artifacts
 
 A `kobaapp.Definition` gathers the APIs of a service, its OpenAPI output and

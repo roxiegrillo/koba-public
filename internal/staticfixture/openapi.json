@@ -24,15 +24,31 @@
         ],
         "type": "object"
       },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.ComposeDetails": {
+        "properties": {
+          "note": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.ComposePayload": {
+        "properties": {
+          "details": {
+            "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.ComposeDetails"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Request": {
         "properties": {
           "name": {
             "type": "string"
           }
         },
-        "required": [
-          "name"
-        ],
         "type": "object"
       },
       "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response": {
@@ -42,6 +58,13 @@
           }
         },
         "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
       }
     }
   },
@@ -58,7 +81,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Request"
+                "properties": {
+                  "name": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
               }
             }
           },
@@ -90,6 +123,26 @@
             },
             "description": "Invalid request"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Required OAuth scope not granted"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -101,9 +154,17 @@
             "description": "Internal server error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Create",
         "tags": [
           "static-fixture"
+        ],
+        "x-required-scopes": [
+          "create:fixtures"
         ]
       }
     },
@@ -290,6 +351,202 @@
           }
         },
         "summary": "Update",
+        "tags": [
+          "static-fixture"
+        ]
+      }
+    },
+    "/fixtures/{id}/compose": {
+      "patch": {
+        "operationId": "composeStaticFixture",
+        "parameters": [
+          {
+            "description": "Fixture ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional page size",
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "details": {
+                    "properties": {
+                      "note": {
+                        "maxLength": 128,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "note"
+                    ],
+                    "type": "object"
+                  },
+                  "name": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "details",
+                  "name"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Deeply nested composition payload.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Compose",
+        "tags": [
+          "static-fixture"
+        ]
+      }
+    },
+    "/fixtures/{id}/inspect": {
+      "get": {
+        "operationId": "inspectStaticFixture",
+        "parameters": [
+          {
+            "description": "Fixture ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "in": "query",
+            "name": "page_size",
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Trace ID",
+            "in": "header",
+            "name": "X-Trace-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 16,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID",
+            "in": "cookie",
+            "name": "session",
+            "schema": {
+              "maxLength": 16,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response"
+                }
+              }
+            },
+            "description": "Inspected fixture",
+            "headers": {
+              "X-Next-Page-Token": {
+                "description": "Opaque continuation token",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {}
+        ],
+        "summary": "Inspect",
         "tags": [
           "static-fixture"
         ]

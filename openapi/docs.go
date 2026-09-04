@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	httprouter "github.com/roxiegrillo/koba/v2/internal/httprouter"
 	fb "github.com/roxiegrillo/koba/v2"
-	"github.com/roxiegrillo/koba/v2/internal/httprouter"
 	"github.com/swaggest/swgui/v5emb"
 )
 
@@ -30,8 +30,9 @@ const (
 )
 
 // Mount generates a document from the APIs registered on app and exposes a
-// self-contained Swagger UI plus the raw JSON contract on the app's HTTP
-// transport.
+// self-contained Swagger UI plus the raw JSON contract on the app's Gin
+// transport. Callers choose when to mount it relative to authentication
+// middleware.
 func Mount(app any, config Config, options DocsOptions) (*openapi3.T, error) {
 	registry, ok := app.(fb.WithAPIDescriptions)
 	if !ok {
@@ -39,7 +40,7 @@ func Mount(app any, config Config, options DocsOptions) (*openapi3.T, error) {
 	}
 	withRouter, ok := app.(fb.WithRouter)
 	if !ok {
-		return nil, fmt.Errorf("koba/openapi: app does not expose its HTTP transport")
+		return nil, fmt.Errorf("koba/openapi: app does not expose its Gin transport")
 	}
 	document, err := GenerateFromApp(config, registry)
 	if err != nil {
@@ -57,12 +58,12 @@ func Mount(app any, config Config, options DocsOptions) (*openapi3.T, error) {
 func MountJSON(app any, contents []byte, options DocsOptions) (*openapi3.T, error) {
 	withRouter, ok := app.(fb.WithRouter)
 	if !ok {
-		return nil, fmt.Errorf("koba/openapi: app does not expose its HTTP transport")
+		return nil, fmt.Errorf("koba/openapi: app does not expose its Gin transport")
 	}
 	return RegisterJSONDocs(withRouter.Router(), contents, options)
 }
 
-// RegisterDocs mounts an already-built document on the app's router.
+// RegisterDocs mounts an already-built document on a Gin router.
 func RegisterDocs(router httprouter.IRouter, document *openapi3.T, options DocsOptions) error {
 	if router == nil {
 		return fmt.Errorf("koba/openapi: documentation router is nil")

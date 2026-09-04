@@ -11,20 +11,53 @@ import (
 type BodyDecoder func(target any) error
 
 // Invocation contains the transport-neutral inputs made available to an API
-// operation. Context carries headers, query values, the request, and named
-// path parameters using the existing koba conventions.
+// operation. Context carries normalized OperationInputs and, for compatibility,
+// the active adapter may also attach its legacy transport values.
 type Invocation struct {
 	Context    context.Context
 	DecodeBody BodyDecoder
+	// Input is a request value already constructed and validated by the active
+	// transport. HasInput distinguishes an intentional nil/zero request from the
+	// legacy path where the invoker asks DecodeBody to populate it.
+	Input    any
+	HasInput bool
 }
 
 // Decode invokes the transport body decoder and provides the same explicit
 // error in reflected and generated plans when a caller omitted that decoder.
 func (invocation Invocation) Decode(target any) error {
+	if invocation.HasInput {
+		return assignInvocationInput(target, invocation.Input)
+	}
 	if invocation.DecodeBody == nil {
 		return fmt.Errorf("koba: body decoder is not available")
 	}
 	return invocation.DecodeBody(target)
+}
+
+func assignInvocationInput(target any, input any) error {
+	destination := reflect.ValueOf(target)
+	if !destination.IsValid() || destination.Kind() != reflect.Pointer || destination.IsNil() {
+		return fmt.Errorf("koba: invocation input target must be a non-nil pointer")
+	}
+	destination = destination.Elem()
+	source := reflect.ValueOf(input)
+	if !source.IsValid() {
+		return fmt.Errorf("koba: constructed invocation input is nil")
+	}
+	if source.Type().AssignableTo(destination.Type()) {
+		destination.Set(source)
+		return nil
+	}
+	if source.Kind() == reflect.Pointer && !source.IsNil() && source.Elem().Type().AssignableTo(destination.Type()) {
+		destination.Set(source.Elem())
+		return nil
+	}
+	return fmt.Errorf(
+		"koba: constructed invocation input has type %s, want %s",
+		source.Type(),
+		destination.Type(),
+	)
 }
 
 // InvocationResult distinguishes a void operation from an operation which
@@ -66,7 +99,7 @@ func CompileAPI(api any) (compiled CompiledAPI, err error) {
 			}
 		}()
 		compiled = generated.KobaCompiledAPI()
-		if err := validateCompiledAPI(compiled); err != nil {
+		if err := validateCompiledAPI(&compiled); err != nil {
 			return CompiledAPI{}, err
 		}
 		return compiled, nil
@@ -105,18 +138,27 @@ func reflectedOperationInvoker(inputTypes []reflect.Type, method reflect.Value) 
 			inputs = append(inputs, reflect.ValueOf(invocation.Context))
 		}
 		if originalType := bodyInputType(inputTypes); originalType != nil {
-			valueType := originalType
 			if originalType.Kind() == reflect.Pointer {
-				valueType = originalType.Elem()
+				var value reflect.Value
+				if invocation.HasInput {
+					value = reflect.New(originalType).Elem()
+					if err := invocation.Decode(value.Addr().Interface()); err != nil {
+						return InvocationResult{}, err
+					}
+				} else {
+					value = reflect.New(originalType.Elem())
+					if err := invocation.Decode(value.Interface()); err != nil {
+						return InvocationResult{}, err
+					}
+				}
+				inputs = append(inputs, value)
+			} else {
+				value := reflect.New(originalType)
+				if err := invocation.Decode(value.Interface()); err != nil {
+					return InvocationResult{}, err
+				}
+				inputs = append(inputs, value.Elem())
 			}
-			value := reflect.New(valueType)
-			if err := invocation.Decode(value.Interface()); err != nil {
-				return InvocationResult{}, err
-			}
-			if originalType.Kind() != reflect.Pointer {
-				value = reflect.Indirect(value)
-			}
-			inputs = append(inputs, value)
 		}
 
 		outputs := method.Call(inputs)
@@ -134,12 +176,29 @@ func reflectedOperationInvoker(inputTypes []reflect.Type, method reflect.Value) 
 	}
 }
 
-func validateCompiledAPI(compiled CompiledAPI) error {
+func validateCompiledAPI(compiled *CompiledAPI) error {
 	if len(compiled.Description.Operations) == 0 {
 		return fmt.Errorf("koba: compiled API contains no operations")
 	}
 	known := make(map[string]struct{}, len(compiled.Description.Operations))
-	for _, operation := range compiled.Description.Operations {
+	for index := range compiled.Description.Operations {
+		operation := &compiled.Description.Operations[index]
+		if operation.Contract.Request != nil {
+			return fmt.Errorf(
+				"koba: %s: compiled plans must contain resolved RequestBindings instead of a request companion",
+				operation.MethodName,
+			)
+		}
+		normalized, err := normalizeOperationContract(operation.Contract)
+		if err != nil {
+			return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
+		}
+		operation.Contract = normalized
+		requestBindings, err := normalizeResolvedRequestBindings(operation.RequestBindings, operation.InputType)
+		if err != nil {
+			return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
+		}
+		operation.RequestBindings = requestBindings
 		if _, duplicate := known[operation.MethodName]; duplicate {
 			return fmt.Errorf("koba: compiled API contains duplicate method %q", operation.MethodName)
 		}
