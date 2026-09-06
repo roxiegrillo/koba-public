@@ -3,6 +3,7 @@ package staticgen
 import (
 	"bytes"
 	"fmt"
+	"go/token"
 	"path"
 	"reflect"
 	"sort"
@@ -63,11 +64,20 @@ func isStandardImportPath(importPath string) bool {
 
 func (imports *importSet) typeExpression(value reflect.Type) (string, error) {
 	if value.Name() != "" {
+		if strings.Contains(value.Name(), "[") {
+			return "", fmt.Errorf(
+				"instantiated generic type %s is not supported by static generation",
+				value,
+			)
+		}
 		if value.PkgPath() == "" {
 			return value.Name(), nil
 		}
 		if value.PkgPath() == imports.current {
 			return value.Name(), nil
+		}
+		if !token.IsExported(value.Name()) {
+			return "", fmt.Errorf("external type %s is not exported", value)
 		}
 		alias := imports.alias(value.PkgPath())
 		return alias + "." + value.Name(), nil
@@ -89,6 +99,34 @@ func (imports *importSet) typeExpression(value reflect.Type) (string, error) {
 		}
 		element, err := imports.typeExpression(value.Elem())
 		return "map[" + key + "]" + element, err
+	case reflect.Struct:
+		var expression strings.Builder
+		expression.WriteString("struct {")
+		for index := 0; index < value.NumField(); index++ {
+			field := value.Field(index)
+			if !field.IsExported() {
+				return "", fmt.Errorf("unnamed struct type %s contains unexported field %s", value, field.Name)
+			}
+			fieldType, err := imports.typeExpression(field.Type)
+			if err != nil {
+				return "", fmt.Errorf("field %s: %w", field.Name, err)
+			}
+			expression.WriteByte(' ')
+			if field.Anonymous {
+				expression.WriteString(fieldType)
+			} else {
+				expression.WriteString(field.Name)
+				expression.WriteByte(' ')
+				expression.WriteString(fieldType)
+			}
+			if field.Tag != "" {
+				expression.WriteByte(' ')
+				expression.WriteString(strconv.Quote(string(field.Tag)))
+			}
+			expression.WriteByte(';')
+		}
+		expression.WriteString(" }")
+		return expression.String(), nil
 	}
 	if value.Kind() == reflect.Interface && value.NumMethod() == 0 {
 		return "any", nil

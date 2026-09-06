@@ -4,8 +4,9 @@ import (
 	"net/http"
 	"regexp"
 
-	"github.com/emirpasic/gods/maps/linkedhashmap"
 	httprouter "github.com/roxiegrillo/koba/v2/internal/httprouter"
+
+	internalhttpadapter "github.com/roxiegrillo/koba/v2/internal/transport/httpadapter"
 )
 
 type Empty struct{}
@@ -14,7 +15,8 @@ type Empty struct{}
 KobaApp is used to register api's.
 * Public functions are mapped to Http endpoints.
 * The exception to this rules is a public Routes function which should return a `map[string]string`.
-* If the function returns a value, the value is json serialzed in the response body
+* If the function returns a value, the value is JSON serialized in the response body.
+* A function may return error by itself or after its response value. A non-nil error uses the standard transport error mapping and discards the response value.
 * If a function accepts a value, the body is serialized and passed to the function to process the request.
 * Functions can contain a leading `context.Context` argument. This will not be serialzed and does not determine the http Method. Headers and Query arguments will be passed to `context.Context` argument.
 */
@@ -41,6 +43,13 @@ type WithAPIDescriptions interface {
 	RegisteredAPIDescriptions() []APIDescription
 }
 
+// WithOperationalProbes exposes whether the app runtime owns the standard
+// liveness and readiness endpoints. Documentation adapters use this state to
+// include the same operational surface without treating probes as domain APIs.
+type WithOperationalProbes interface {
+	DefaultProbesEnabled() bool
+}
+
 /*WithRoutesAPI are implemented by apis that required to override default naming conventions*/
 type WithRoutesAPI interface {
 	Routes() map[string]string
@@ -58,8 +67,9 @@ type WithMiddlewareRegexUse interface {
 
 type kobaApp struct {
 	r                                *httprouter.Engine
-	middleware                       *linkedhashmap.Map
+	middleware                       *internalhttpadapter.MiddlewareRegistry
 	authenticationMiddleware         http.Handler
 	authenticationMiddlewareIsGlobal bool
+	defaultProbesDisabled            bool
 	apis                             []APIDescription
 }

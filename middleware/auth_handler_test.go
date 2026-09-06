@@ -142,3 +142,40 @@ func TestOptionalMiddlewareAllowsAnonymousRequestsAndFailsClosedOnBadCredentials
 		})
 	}
 }
+
+func TestResolverHandlersRejectMultipleAuthorizationHeaders(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		handler func(*AuthMiddleware) http.Handler
+	}{
+		{name: "required", handler: func(auth *AuthMiddleware) http.Handler { return auth.Middleware() }},
+		{name: "optional with credentials", handler: func(auth *AuthMiddleware) http.Handler { return auth.OptionalMiddleware() }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			validationCalls := 0
+			auth, err := NewAuthMiddlewareWithTokenValidator(func(_ context.Context, _ string) (any, error) {
+				validationCalls++
+				return claims("auth0|user-1"), nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
+			request.Header.Add("Authorization", "Bearer first-token")
+			request.Header.Add("Authorization", "Bearer second-token")
+			response := httptest.NewRecorder()
+
+			test.handler(auth).ServeHTTP(response, request)
+
+			if got, want := response.Code, http.StatusUnauthorized; got != want {
+				t.Fatalf("status = %d, want %d", got, want)
+			}
+			if validationCalls != 0 {
+				t.Fatalf("validation calls = %d, want 0", validationCalls)
+			}
+			if _, ok := PrincipalFromContext(request.Context()); ok {
+				t.Fatal("ambiguous request received a Principal")
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -184,6 +185,9 @@ func TestBuildRendersRequiredScopesAndAuthorizationResponses(t *testing.T) {
 	gotScopes, ok := operation.Extensions["x-required-scopes"].([]string)
 	if want := []string{"read:notes", "read:profile"}; !ok || len(gotScopes) != len(want) || gotScopes[0] != want[0] || gotScopes[1] != want[1] {
 		t.Fatalf("x-required-scopes = %#v, want %v", operation.Extensions["x-required-scopes"], want)
+	}
+	if want := "Required OAuth scopes: read:notes, read:profile."; !strings.Contains(operation.Description, want) {
+		t.Errorf("operation description = %q, want it to contain %q", operation.Description, want)
 	}
 	for _, status := range []string{"401", "403"} {
 		if response := operation.Responses.Value(status); response == nil || response.Value == nil {

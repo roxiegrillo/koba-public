@@ -19,6 +19,7 @@ func describeReflectedAPI(api any) (description APIDescription, err error) {
 	}
 	description.Name = documentation.Name
 	description.Description = documentation.Description
+	description.Document = cloneAPIDocument(documentation.Document)
 	contract, err := apiContract(api)
 	if err != nil {
 		return APIDescription{}, err
@@ -36,7 +37,40 @@ func describeReflectedAPI(api any) (description APIDescription, err error) {
 			continue
 		}
 		inputTypes, outputTypes := GetInputOutputTypes(method)
-		post, methodErr := isPost(inputTypes, outputTypes)
+		results, signatureErr := analyzeOperationResults(outputTypes)
+		if signatureErr != nil {
+			return APIDescription{}, fmt.Errorf("koba: describe %s: %w", method.Name, signatureErr)
+		}
+		operationContract := contract.Operations[method.Name]
+		operationDocumentation := documentation.Operations[method.Name]
+		operationID := strings.TrimSpace(operationDocumentation.OperationID)
+		if operationID == "" {
+			operationID = defaultOperationID(typeOfAPI, method.Name)
+		}
+		operation := OperationDescription{
+			MethodName:    method.Name,
+			OperationID:   operationID,
+			Documentation: operationDocumentation,
+			Contract:      operationContract,
+		}
+
+		if operation.HasKafkaConsumerTransport() {
+			if _, routeIsExplicit := routes[method.Name]; routeIsExplicit {
+				return APIDescription{}, fmt.Errorf(
+					"koba: describe %s: Kafka consumer operation cannot declare an HTTP route",
+					method.Name,
+				)
+			}
+			messageType, signatureErr := kafkaConsumerSignature(inputTypes, results)
+			if signatureErr != nil {
+				return APIDescription{}, fmt.Errorf("koba: describe %s: %w", method.Name, signatureErr)
+			}
+			operation.InputType = messageType
+			description.Operations = append(description.Operations, operation)
+			continue
+		}
+
+		post, methodErr := isPost(inputTypes)
 		if methodErr != nil {
 			return APIDescription{}, fmt.Errorf("koba: describe %s: %w", method.Name, methodErr)
 		}
@@ -46,10 +80,20 @@ func describeReflectedAPI(api any) (description APIDescription, err error) {
 			httpMethod = http.MethodPost
 		}
 		route, routeIsExplicit := routes[method.Name]
+		documentedRoute := strings.TrimSpace(operationDocumentation.Route)
+		if routeIsExplicit && documentedRoute != "" {
+			return APIDescription{}, fmt.Errorf(
+				"koba: describe %s: route is declared in both Routes and APIDocumentation",
+				method.Name,
+			)
+		}
+		if documentedRoute != "" {
+			route = documentedRoute
+			routeIsExplicit = true
+		}
 		if !routeIsExplicit {
 			route = "/" + method.Name
 		}
-		operationDocumentation := documentation.Operations[method.Name]
 		if explicitMethod := strings.ToUpper(strings.TrimSpace(operationDocumentation.Method)); explicitMethod != "" {
 			switch explicitMethod {
 			case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -58,21 +102,12 @@ func describeReflectedAPI(api any) (description APIDescription, err error) {
 				return APIDescription{}, fmt.Errorf("koba: describe %s: unsupported HTTP method %q", method.Name, operationDocumentation.Method)
 			}
 		}
-		operationID := strings.TrimSpace(operationDocumentation.OperationID)
-		if operationID == "" {
-			operationID = defaultOperationID(typeOfAPI, method.Name)
-		}
-		operation := OperationDescription{
-			MethodName:    method.Name,
-			OperationID:   operationID,
-			Route:         route,
-			HTTPMethod:    httpMethod,
-			Documentation: operationDocumentation,
-			Contract:      contract.Operations[method.Name],
-		}
+		operation.Route = route
+		operation.HTTPMethod = httpMethod
 		if bodyType := bodyInputType(inputTypes); bodyType != nil {
 			operation.InputType = bodyType
 		}
+		operation.OutputType = results.OutputType
 		if operation.Contract.Request != nil {
 			if len(operation.Contract.Inputs) != 0 {
 				return APIDescription{}, fmt.Errorf(
@@ -90,8 +125,14 @@ func describeReflectedAPI(api any) (description APIDescription, err error) {
 			// static generation.
 			operation.Contract.Request = nil
 		}
-		if len(outputTypes) == 1 {
-			operation.OutputType = outputTypes[0]
+		if operation.Contract.Response != nil {
+			bindings, bindingErr := normalizeResponseBindings(operation.Contract.Response, operation.OutputType)
+			if bindingErr != nil {
+				return APIDescription{}, fmt.Errorf("koba: describe %s: %w", method.Name, bindingErr)
+			}
+			operation.ResponseBindings = bindings
+			// Retain only framework-owned compiled bindings in execution plans.
+			operation.Contract.Response = nil
 		}
 		description.Operations = append(description.Operations, operation)
 	}
@@ -103,6 +144,40 @@ func describeReflectedAPI(api any) (description APIDescription, err error) {
 		return APIDescription{}, err
 	}
 	return description, nil
+}
+
+func kafkaConsumerSignature(inputTypes []reflect.Type, results operationResultSignature) (reflect.Type, error) {
+	start := 0
+	if HasContext(inputTypes) {
+		start = 1
+	}
+	if len(inputTypes) != start+1 {
+		return nil, fmt.Errorf("Kafka consumer operation requires exactly one message argument, with an optional context.Context")
+	}
+	messageType := inputTypes[start]
+	if _, err := inferKafkaMessageEncoding(messageType); err != nil {
+		return nil, err
+	}
+	if results.OutputType != nil {
+		return nil, fmt.Errorf("Kafka consumer operation may only return error")
+	}
+	return messageType, nil
+}
+
+func cloneAPIDocument(document *APIDocument) *APIDocument {
+	if document == nil {
+		return nil
+	}
+	cloned := *document
+	cloned.Servers = append([]APIServer(nil), document.Servers...)
+	cloned.SecuritySchemes = append([]APISecurityScheme(nil), document.SecuritySchemes...)
+	if document.DefaultSecurity != nil {
+		cloned.DefaultSecurity = make([]SecurityRequirement, len(document.DefaultSecurity))
+		for index, requirement := range document.DefaultSecurity {
+			cloned.DefaultSecurity[index] = append(SecurityRequirement(nil), requirement...)
+		}
+	}
+	return &cloned
 }
 
 func apiContract(api any) (contract APIContract, err error) {

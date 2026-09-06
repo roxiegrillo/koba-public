@@ -4,37 +4,78 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+
+	internalvaluekind "github.com/roxiegrillo/koba/v2/internal/valuekind"
 )
 
-// BindingSource identifies the transport value used to populate a request
+// BindingSource identifies the boundary value used to populate a request
 // field. Body bindings decode the complete request body into their target
 // field; consequently an operation may contain at most one body binding.
 type BindingSource string
 
 const (
-	BindingSourceQuery  BindingSource = "query"
-	BindingSourcePath   BindingSource = "path"
-	BindingSourceHeader BindingSource = "header"
-	BindingSourceCookie BindingSource = "cookie"
-	BindingSourceBody   BindingSource = "body"
-	BindingSourceValue  BindingSource = "value"
+	BindingSourceQuery   BindingSource = "query"
+	BindingSourcePath    BindingSource = "path"
+	BindingSourceHeader  BindingSource = "header"
+	BindingSourceCookie  BindingSource = "cookie"
+	BindingSourceBody    BindingSource = "body"
+	BindingSourceValue   BindingSource = "value"
+	BindingSourceSubject BindingSource = "subject"
 )
 
 // Binding is a typed leaf in a request companion struct. Its type parameter
 // must exactly match the corresponding field in the operation request,
 // including named and pointer types. Bindings are constructed with Query,
-// Path, Header, Cookie, or Value rather than struct literals so their Go type
-// cannot drift from T.
+// Path, Header, Cookie, Subject, or Value rather than struct literals so their
+// Go type cannot drift from T.
 type Binding[T any] struct {
-	source   BindingSource
-	name     string
-	contract InputContract
+	source        BindingSource
+	name          string
+	contract      InputContract
+	documentation *BindingDocumentation
 }
 
 type bindingMetadata struct {
-	source   BindingSource
-	name     string
-	contract InputContract
+	source        BindingSource
+	name          string
+	contract      InputContract
+	documentation *BindingDocumentation
+}
+
+// BindingDocumentation contains human-facing semantic metadata for a request
+// or response binding. Transport renderers such as OpenAPI may project it,
+// while structural rules remain in the binding's InputContract.
+type BindingDocumentation struct {
+	Description string
+	Deprecated  bool
+	Example     any
+}
+
+// BindingDocumentationOption configures metadata attached with Document.
+type BindingDocumentationOption interface {
+	applyBindingDocumentation(*BindingDocumentation)
+}
+
+type bindingDocumentationOptionFunc func(*BindingDocumentation)
+
+func (option bindingDocumentationOptionFunc) applyBindingDocumentation(documentation *BindingDocumentation) {
+	option(documentation)
+}
+
+// Example adds an example value to binding documentation. Contract
+// compilation validates and normalizes it against the binding's Go type and
+// structural constraints.
+func Example(value any) BindingDocumentationOption {
+	return bindingDocumentationOptionFunc(func(documentation *BindingDocumentation) {
+		documentation.Example = value
+	})
+}
+
+// Deprecated marks a documented binding as deprecated.
+func Deprecated() BindingDocumentationOption {
+	return bindingDocumentationOptionFunc(func(documentation *BindingDocumentation) {
+		documentation.Deprecated = true
+	})
 }
 
 type requestBindingLeaf interface {
@@ -42,8 +83,10 @@ type requestBindingLeaf interface {
 }
 
 type bodyObjectMetadata struct {
-	descriptor any
-	options    []InputOption
+	descriptor    any
+	options       []InputOption
+	rules         []ObjectRule
+	documentation *BindingDocumentation
 }
 
 type requestBodyObject interface {
@@ -56,9 +99,10 @@ func (binding Binding[T]) requestBindingMetadata() bindingMetadata {
 		contract.GoType = reflect.TypeFor[T]()
 	}
 	return bindingMetadata{
-		source:   binding.source,
-		name:     binding.name,
-		contract: contract,
+		source:        binding.source,
+		name:          binding.name,
+		contract:      contract,
+		documentation: cloneBindingDocumentation(binding.documentation),
 	}
 }
 
@@ -68,6 +112,71 @@ func newBinding[T any](source BindingSource, name string, options ...InputOption
 		name:     name,
 		contract: InputOf[T](options...),
 	}
+}
+
+// Document attaches human-facing semantic metadata to a query, path, header,
+// cookie, body, or body-value binding. Subject values are framework-owned and
+// intentionally cannot be documented as client input.
+func (binding Binding[T]) Document(
+	description string,
+	options ...BindingDocumentationOption,
+) Binding[T] {
+	documentation := BindingDocumentation{Description: description}
+	for _, option := range options {
+		if option != nil {
+			option.applyBindingDocumentation(&documentation)
+		}
+	}
+	binding.documentation = &documentation
+	return binding
+}
+
+func cloneBindingDocumentation(documentation *BindingDocumentation) *BindingDocumentation {
+	if documentation == nil {
+		return nil
+	}
+	cloned := *documentation
+	return &cloned
+}
+
+func normalizeBindingDocumentation(
+	documentation *BindingDocumentation,
+	input InputContract,
+	source BindingSource,
+) (*BindingDocumentation, error) {
+	if documentation == nil {
+		return nil, nil
+	}
+	switch source {
+	case BindingSourceQuery, BindingSourcePath, BindingSourceHeader, BindingSourceCookie,
+		BindingSourceBody, BindingSourceValue:
+	default:
+		return nil, fmt.Errorf("binding source %q does not support inline documentation", source)
+	}
+
+	normalized := *documentation
+	normalized.Description = strings.TrimSpace(normalized.Description)
+	if normalized.Description == "" {
+		return nil, fmt.Errorf("binding documentation description is required")
+	}
+	if normalized.Example != nil {
+		example, err := normalizeContractValue(normalized.Example, input.GoType)
+		if err != nil {
+			return nil, fmt.Errorf("binding documentation example: %w", err)
+		}
+		if isNilContractValue(example) {
+			return nil, fmt.Errorf("binding documentation example: must not be null")
+		}
+		if err := validateInputValue(input, example); err != nil {
+			return nil, fmt.Errorf("binding documentation example: %w", err)
+		}
+		owned, err := cloneDocumentationContractValue(example)
+		if err != nil {
+			return nil, fmt.Errorf("binding documentation example: %w", err)
+		}
+		normalized.Example = owned
+	}
+	return &normalized, nil
 }
 
 // Query binds one query parameter to the corresponding request field.
@@ -92,6 +201,13 @@ func Cookie[T any](name string, options ...InputOption) Binding[T] {
 	return newBinding[T](BindingSourceCookie, name, options...)
 }
 
+// Subject binds the authenticated principal subject to a string request
+// field. Declaring this binding makes the operation authenticated even when it
+// does not require any OAuth scopes.
+func Subject() Binding[string] {
+	return newBinding[string](BindingSourceSubject, "", Required(), MinLength(1))
+}
+
 // Value describes a field inside a BodyObject. It inherits the enclosing body
 // source and adds typed rules at the corresponding request field.
 func Value[T any](options ...InputOption) Binding[T] {
@@ -113,8 +229,10 @@ func Body[T any](options ...InputOption) Binding[T] {
 // the request body. Its descendant leaves use Value[T] and may be nested in
 // ordinary companion structs to describe deeply nested body fields.
 type BodyObjectBinding[T any] struct {
-	descriptor T
-	options    []InputOption
+	descriptor    T
+	options       []InputOption
+	rules         []ObjectRule
+	documentation *BindingDocumentation
 }
 
 // BodyObject declares that the complete request body maps to the corresponding
@@ -127,10 +245,36 @@ func BodyObject[T any](descriptor T, options ...InputOption) BodyObjectBinding[T
 	}
 }
 
+// WithRules adds structural field-presence relationships to this body object.
+// Paths in each rule are relative to the BodyObject and use exported Go field
+// names. Rules are enforced before the API function runs and are projected to
+// transport contracts such as OpenAPI.
+func (object BodyObjectBinding[T]) WithRules(rules ...ObjectRule) BodyObjectBinding[T] {
+	object.rules = append(append([]ObjectRule(nil), object.rules...), rules...)
+	return object
+}
+
+// Document attaches human-facing metadata to the request body object.
+func (object BodyObjectBinding[T]) Document(
+	description string,
+	options ...BindingDocumentationOption,
+) BodyObjectBinding[T] {
+	documentation := BindingDocumentation{Description: description}
+	for _, option := range options {
+		if option != nil {
+			option.applyBindingDocumentation(&documentation)
+		}
+	}
+	object.documentation = &documentation
+	return object
+}
+
 func (object BodyObjectBinding[T]) requestBodyObjectMetadata() bodyObjectMetadata {
 	return bodyObjectMetadata{
-		descriptor: object.descriptor,
-		options:    append([]InputOption(nil), object.options...),
+		descriptor:    object.descriptor,
+		options:       append([]InputOption(nil), object.options...),
+		rules:         append([]ObjectRule(nil), object.rules...),
+		documentation: cloneBindingDocumentation(object.documentation),
 	}
 }
 
@@ -140,11 +284,15 @@ func (object BodyObjectBinding[T]) requestBodyObjectMetadata() bodyObjectMetadat
 // API authors normally construct the recursive OperationContract.Request
 // descriptor instead of creating RequestBinding values directly.
 type RequestBinding struct {
-	Source     BindingSource
-	Name       string
-	FieldPath  []string
-	FieldIndex []int
-	Input      InputContract
+	Source        BindingSource
+	Name          string
+	FieldPath     []string
+	FieldIndex    []int
+	Input         InputContract
+	Documentation *BindingDocumentation
+	// ObjectRules contains normalized structural presence relationships for a
+	// BodyObject binding. Other binding sources must leave it empty.
+	ObjectRules []ObjectRule
 }
 
 // normalizeRequestBindings validates a request companion against the actual
@@ -168,12 +316,17 @@ func normalizeRequestBindings(request any, inputType reflect.Type) ([]RequestBin
 	if len(walker.bindings) == 0 {
 		return nil, fmt.Errorf("request contract contains no bindings")
 	}
+	if err := validateRequestBodyDefault(walker.bindings, inputType); err != nil {
+		return nil, fmt.Errorf("request body default: %w", err)
+	}
 	return walker.bindings, nil
 }
 
 type requestBindingWalker struct {
 	bindings       []RequestBinding
 	bodyPath       string
+	subjectPath    string
+	subjectSeen    bool
 	activePointers map[uintptr]string
 	wireBindings   map[string]string
 }
@@ -302,6 +455,24 @@ func (walker *requestBindingWalker) addBinding(
 			)
 		}
 		walker.wireBindings[wireKey] = path
+	case BindingSourceSubject:
+		if insideBody {
+			return fmt.Errorf("request contract field %q cannot bind the authenticated subject from inside a BodyObject", path)
+		}
+		if metadata.name != "" {
+			return fmt.Errorf("request contract field %q has an unexpected subject name %q", path, metadata.name)
+		}
+		if targetType != reflect.TypeFor[string]() {
+			return fmt.Errorf("request contract field %q has type %s; subject bindings require string", path, targetType)
+		}
+		if !metadata.contract.Required {
+			return fmt.Errorf("request contract field %q must require the authenticated subject", path)
+		}
+		if walker.subjectSeen {
+			return fmt.Errorf("request contract fields %q and %q both bind the authenticated subject", walker.subjectPath, path)
+		}
+		walker.subjectSeen = true
+		walker.subjectPath = path
 	case BindingSourceBody:
 		if insideBody {
 			return fmt.Errorf("request contract field %q cannot declare a nested body binding", path)
@@ -322,12 +493,23 @@ func (walker *requestBindingWalker) addBinding(
 	if err != nil {
 		return fmt.Errorf("request contract field %q: %w", path, err)
 	}
+	if normalized.Nullable && metadata.source != BindingSourceBody && metadata.source != BindingSourceValue {
+		return fmt.Errorf(
+			"request contract field %q: nullable is only supported for body and body-value bindings",
+			path,
+		)
+	}
+	documentation, err := normalizeBindingDocumentation(metadata.documentation, normalized, metadata.source)
+	if err != nil {
+		return fmt.Errorf("request contract field %q: %w", path, err)
+	}
 	walker.bindings = append(walker.bindings, RequestBinding{
-		Source:     metadata.source,
-		Name:       metadata.name,
-		FieldPath:  append([]string(nil), fieldPath...),
-		FieldIndex: append([]int(nil), fieldIndex...),
-		Input:      normalized,
+		Source:        metadata.source,
+		Name:          metadata.name,
+		FieldPath:     append([]string(nil), fieldPath...),
+		FieldIndex:    append([]int(nil), fieldIndex...),
+		Input:         normalized,
+		Documentation: documentation,
 	})
 	return nil
 }
@@ -360,13 +542,23 @@ func (walker *requestBindingWalker) addBodyObject(
 	if err != nil {
 		return fmt.Errorf("request contract body object %q: %w", path, err)
 	}
+	documentation, err := normalizeBindingDocumentation(metadata.documentation, normalized, BindingSourceBody)
+	if err != nil {
+		return fmt.Errorf("request contract body object %q: %w", path, err)
+	}
+	rules, err := normalizeObjectRules(metadata.rules, targetType)
+	if err != nil {
+		return fmt.Errorf("request contract body object %q: %w", path, err)
+	}
 
 	walker.bodyPath = path
 	walker.bindings = append(walker.bindings, RequestBinding{
-		Source:     BindingSourceBody,
-		FieldPath:  append([]string(nil), fieldPath...),
-		FieldIndex: append([]int(nil), fieldIndex...),
-		Input:      normalized,
+		Source:        BindingSourceBody,
+		FieldPath:     append([]string(nil), fieldPath...),
+		FieldIndex:    append([]int(nil), fieldIndex...),
+		Input:         normalized,
+		ObjectRules:   rules,
+		Documentation: documentation,
 	})
 	return walker.walk(reflect.ValueOf(metadata.descriptor), targetType, fieldPath, fieldIndex, true)
 }
@@ -401,7 +593,7 @@ func requestScalarType(valueType reflect.Type) bool {
 	for valueType.Kind() == reflect.Pointer {
 		valueType = valueType.Elem()
 	}
-	return httpPrimitiveScalarKind(valueType.Kind())
+	return internalvaluekind.IsScalar(valueType.Kind())
 }
 
 func requestWireBindingKey(source BindingSource, name string) string {

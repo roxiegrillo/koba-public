@@ -78,7 +78,7 @@ func Generate(config Config) ([]byte, error) {
 			return nil, fmt.Errorf("koba/staticgen: describe %s: %w", identity, err)
 		}
 		for _, operation := range description.Operations {
-			if operation.InputType != nil || operation.OutputType != nil || len(operation.Documentation.Parameters) != 0 || len(operation.Contract.Inputs) != 0 || len(operation.RequestBindings) != 0 {
+			if operation.InputType != nil || operation.OutputType != nil || len(operation.Documentation.Parameters) != 0 || hasTypedResponse(operation.Documentation.Responses) || len(operation.Contract.Inputs) != 0 || len(operation.RequestBindings) != 0 || len(operation.ResponseBindings) != 0 {
 				imports.paths["reflect"] = "reflect"
 			}
 			method, ok := apiType.MethodByName(operation.MethodName)
@@ -99,6 +99,57 @@ func Generate(config Config) ([]byte, error) {
 					return nil, fmt.Errorf("koba/staticgen: %s.%s contract type: %w", identity, operation.MethodName, err)
 				}
 			}
+			if webSocket := operation.Contract.Transport.WebSocket; webSocket != nil {
+				if webSocket.Socket.ClientToServer != nil || webSocket.Socket.ServerToClient != nil {
+					imports.paths["reflect"] = "reflect"
+				}
+				for _, transportType := range []reflect.Type{
+					webSocket.Socket.ClientToServerType,
+					webSocket.Socket.ServerToClientType,
+				} {
+					if transportType == nil {
+						continue
+					}
+					if _, err := imports.typeExpression(transportType); err != nil {
+						return nil, fmt.Errorf("koba/staticgen: %s.%s WebSocket transport type: %w", identity, operation.MethodName, err)
+					}
+				}
+				for _, message := range []struct {
+					direction string
+					contract  *fb.SocketMessageContract
+				}{
+					{direction: "client-to-server", contract: webSocket.Socket.ClientToServer},
+					{direction: "server-to-client", contract: webSocket.Socket.ServerToClient},
+				} {
+					if message.contract == nil {
+						continue
+					}
+					for bindingIndex, binding := range message.contract.Bindings {
+						if err := prepareInputContract(imports, binding.Input); err != nil {
+							return nil, fmt.Errorf(
+								"koba/staticgen: %s.%s WebSocket %s binding %d: %w",
+								identity,
+								operation.MethodName,
+								message.direction,
+								bindingIndex+1,
+								err,
+							)
+						}
+						if binding.Documentation != nil && binding.Documentation.Example != nil {
+							if _, err := documentationExampleLiteral(binding.Documentation.Example, binding.Input.GoType, imports); err != nil {
+								return nil, fmt.Errorf(
+									"koba/staticgen: %s.%s WebSocket %s binding %d documentation example: %w",
+									identity,
+									operation.MethodName,
+									message.direction,
+									bindingIndex+1,
+									err,
+								)
+							}
+						}
+					}
+				}
+			}
 			for _, parameter := range operation.Documentation.Parameters {
 				if parameter.GoType != nil {
 					if _, err := imports.typeExpression(parameter.GoType); err != nil {
@@ -112,6 +163,14 @@ func Generate(config Config) ([]byte, error) {
 					if _, err := anyLiteral(value); err != nil {
 						return nil, fmt.Errorf("koba/staticgen: %s.%s parameter %s enum %d: %w", identity, operation.MethodName, parameter.Name, enumIndex+1, err)
 					}
+				}
+			}
+			for status, response := range operation.Documentation.Responses {
+				if response.GoType == nil {
+					continue
+				}
+				if _, err := imports.typeExpression(response.GoType); err != nil {
+					return nil, fmt.Errorf("koba/staticgen: %s.%s response HTTP %d: %w", identity, operation.MethodName, status, err)
 				}
 			}
 			contractInputs := make([]string, 0, len(operation.Contract.Inputs))
@@ -134,6 +193,39 @@ func Generate(config Config) ([]byte, error) {
 						bindingIndex+1,
 						err,
 					)
+				}
+				if binding.Documentation != nil && binding.Documentation.Example != nil {
+					if _, err := documentationExampleLiteral(binding.Documentation.Example, binding.Input.GoType, imports); err != nil {
+						return nil, fmt.Errorf(
+							"koba/staticgen: %s.%s request binding %d documentation example: %w",
+							identity,
+							operation.MethodName,
+							bindingIndex+1,
+							err,
+						)
+					}
+				}
+			}
+			for bindingIndex, binding := range operation.ResponseBindings {
+				if err := prepareInputContract(imports, binding.Input); err != nil {
+					return nil, fmt.Errorf(
+						"koba/staticgen: %s.%s response binding %d: %w",
+						identity,
+						operation.MethodName,
+						bindingIndex+1,
+						err,
+					)
+				}
+				if binding.Documentation != nil && binding.Documentation.Example != nil {
+					if _, err := documentationExampleLiteral(binding.Documentation.Example, binding.Input.GoType, imports); err != nil {
+						return nil, fmt.Errorf(
+							"koba/staticgen: %s.%s response binding %d documentation example: %w",
+							identity,
+							operation.MethodName,
+							bindingIndex+1,
+							err,
+						)
+					}
 				}
 			}
 		}
@@ -160,6 +252,15 @@ func Generate(config Config) ([]byte, error) {
 	return formatted, nil
 }
 
+func hasTypedResponse(responses map[int]fb.ResponseDocumentation) bool {
+	for _, response := range responses {
+		if response.GoType != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func prepareInputContract(imports *importSet, input fb.InputContract) error {
 	if _, err := imports.typeExpression(input.GoType); err != nil {
 		return err
@@ -172,13 +273,47 @@ func prepareInputContract(imports *importSet, input fb.InputContract) error {
 		if value == nil {
 			continue
 		}
-		if _, err := anyLiteral(value); err != nil {
+		var err error
+		if constraint.label == "default" {
+			_, err = documentationExampleLiteral(value, input.GoType, imports)
+		} else {
+			_, err = anyLiteral(value)
+		}
+		if err != nil {
 			return fmt.Errorf("%s: %w", label, err)
 		}
 	}
 	for enumIndex, value := range input.Enum {
 		if _, err := anyLiteral(value); err != nil {
 			return fmt.Errorf("enum %d: %w", enumIndex+1, err)
+		}
+	}
+	if input.Items != nil {
+		if err := prepareInputContract(imports, input.Items.Input); err != nil {
+			return fmt.Errorf("collection element: %w", err)
+		}
+		if input.Items.Documentation != nil && input.Items.Documentation.Example != nil {
+			if _, err := documentationExampleLiteral(
+				input.Items.Documentation.Example,
+				input.Items.Input.GoType,
+				imports,
+			); err != nil {
+				return fmt.Errorf("collection element documentation example: %w", err)
+			}
+		}
+		for bindingIndex, binding := range input.Items.Bindings {
+			if err := prepareInputContract(imports, binding.Input); err != nil {
+				return fmt.Errorf("collection element binding %d: %w", bindingIndex+1, err)
+			}
+			if binding.Documentation != nil && binding.Documentation.Example != nil {
+				if _, err := documentationExampleLiteral(
+					binding.Documentation.Example,
+					binding.Input.GoType,
+					imports,
+				); err != nil {
+					return fmt.Errorf("collection element binding %d documentation example: %w", bindingIndex+1, err)
+				}
+			}
 		}
 	}
 	return nil

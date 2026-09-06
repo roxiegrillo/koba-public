@@ -9,12 +9,12 @@
     {
       "kind": "openapi",
       "path": "internal/staticfixture/openapi.json",
-      "sha256": "sha256:c4e0c93f4ea127e14dd9225e096f172cef3923e9241f3eed4f86db1d18c3ad6c"
+      "sha256": "sha256:ffd6dab54c35460199eac6c88729fa731c70222f262038d3063b21b3bcbfaeb4"
     },
     {
       "kind": "static-go",
       "path": "internal/staticfixture/zz_koba.gen.go",
-      "sha256": "sha256:b053d002845c70329aea290d4273c2e3c4097e60d114523947177beb6a575d7b",
+      "sha256": "sha256:bef7705a4cb18548a6cdbe28d4516d6fec204959c2fc9ec65fcb44a365e0f2e9",
       "buildTag": "koba_static"
     }
   ]

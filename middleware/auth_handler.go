@@ -32,11 +32,11 @@ func (a *AuthMiddleware) OptionalMiddleware() http.Handler {
 // ServeHTTP implements http.Handler interface
 func (z *ResolverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logger := log.With().Str("component", "auth").Logger()
-	if z.allowAnonymous && len(r.Header.Values("Authorization")) == 0 {
+	token, present, err := authorizationHeaderToken(r)
+	if z.allowAnonymous && !present {
 		return
 	}
 
-	token, err := jwtmiddleware.AuthHeaderTokenExtractor(r)
 	if err != nil || token == "" {
 		if err == nil {
 			err = fmt.Errorf("missing authorization header")

@@ -4,25 +4,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/roxiegrillo/koba/v2/kobaapp"
 	"github.com/roxiegrillo/koba/v2/internal/staticfixture"
-	"github.com/roxiegrillo/koba/v2/openapi"
+	"github.com/roxiegrillo/koba/v2/kobaapp"
 )
 
 func main() {
 	command := kobaapp.NewCommand(kobaapp.Definition{
-		ID:   "static-fixture",
-		APIs: []any{(*staticfixture.API)(nil)},
-		OpenAPI: openapi.Config{
-			Title:   "Static Fixture API",
-			Version: "1.0.0",
-			SecuritySchemes: []openapi.SecurityScheme{{
-				Name:         "bearerAuth",
-				Type:         openapi.SecurityTypeHTTP,
-				Scheme:       "bearer",
-				BearerFormat: "JWT",
-			}},
-		},
+		ID:             "static-fixture",
+		APIs:           []any{(*staticfixture.API)(nil)},
 		OpenAPIOutput:  "internal/staticfixture/openapi.json",
 		ManifestOutput: "internal/staticfixture/koba.lock.json",
 		StaticTargets: []kobaapp.StaticTarget{{

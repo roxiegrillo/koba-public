@@ -1,13 +1,14 @@
 package koba
 
 import (
+	stderrors "errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
 
 	goerr "github.com/go-errors/errors"
-	"github.com/roxiegrillo/koba/v2/errors"
+	fberrors "github.com/roxiegrillo/koba/v2/errors"
 )
 
 func invokeOperation(invoke OperationInvoker, invocation Invocation) (result InvocationResult, invocationError error, panicError ErrorCtx) {
@@ -26,10 +27,16 @@ func statusCodeAsText(statusCode int) string {
 }
 
 func getErrorMessageAndStatusCode(err interface{}) (errorText string, statusCode int) {
-	if status, ok := err.(errors.WithSatusCode); ok {
+	if status, ok := err.(fberrors.WithSatusCode); ok {
 		statusCode = status.StatusCode()
 	} else {
 		statusCode = http.StatusInternalServerError
+		if asError, ok := err.(error); ok {
+			var wrappedStatus fberrors.WithSatusCode
+			if stderrors.As(asError, &wrappedStatus) {
+				statusCode = wrappedStatus.StatusCode()
+			}
+		}
 	}
 
 	if asError, ok := err.(error); ok {

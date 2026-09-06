@@ -18,7 +18,7 @@ func TestAuthenticationWrapsReflectedAndStaticPlans(t *testing.T) {
 	t.Run("valid principal reaches operation context", func(t *testing.T) {
 		auth, err := middleware.NewAuthMiddlewareWithTokenValidator(func(context.Context, string) (any, error) {
 			return &validator.ValidatedClaims{
-				RegisteredClaims: validator.RegisteredClaims{Subject: "auth0|static-user"},
+				RegisteredClaims: validator.RegisteredClaims{Subject: "auth0|static-user", Expiry: 4102444800},
 				CustomClaims: &middleware.CustomClaims{
 					Scope:       "read:fixtures create:fixtures",
 					Permissions: []string{"unrelated:permission"},
@@ -69,7 +69,7 @@ func TestAuthenticationWrapsReflectedAndStaticPlans(t *testing.T) {
 	t.Run("valid token without required scope never invokes operation", func(t *testing.T) {
 		auth, _ := middleware.NewAuthMiddlewareWithTokenValidator(func(context.Context, string) (any, error) {
 			return &validator.ValidatedClaims{
-				RegisteredClaims: validator.RegisteredClaims{Subject: "auth0|static-user"},
+				RegisteredClaims: validator.RegisteredClaims{Subject: "auth0|static-user", Expiry: 4102444800},
 				CustomClaims: &middleware.CustomClaims{
 					Scope:       "read:fixtures",
 					Permissions: []string{"create:fixtures"},

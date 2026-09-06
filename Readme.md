@@ -140,6 +140,36 @@ checked before the request is constructed, so an unauthorized caller learns
 nothing about the shape of the input; an operation that declares scopes when
 no authentication middleware is configured is refused when the API is added.
 
+## The contract reaches every wire
+
+An operation can now state the interaction around its call. The ordinary
+HTTP request/response remains the default. `WebSocket(Socket[C, S]())`
+declares a typed conversation: `C` is received, `S` is sent, and the types
+choose JSON text frames or protobuf binary frames. Its handshake request is
+bound before `AcceptWebSocket` accepts the connection. Directional message
+companions are checked against those types and published under OpenAPI's
+`x-websocket` extension.
+
+`KafkaConsumer(topic)` declares that messages from a topic invoke an
+operation. The consumer takes one typed message and may return an error,
+but no response value. `workers.Binder.BindAPI` compiles the API through the
+same plan machinery as HTTP; readers, brokers and consumer groups remain
+runtime configuration. Consumers have no HTTP route and are omitted from
+the HTTP document. This release does not support request bindings or
+required scopes on Kafka consumers.
+
+`Subject()` binds the authenticated caller's subject into a string request
+field, requires authentication even without scopes, and never becomes a
+client-controlled parameter. `ResponseValue[T]`, `ResponseObject` and
+`ResponseList` describe successful return values; `MessageValue[T]`
+describes a field in either direction of a socket conversation. Message
+schemas carry structural metadata, while the socket runtime in this release
+performs typed encoding and decoding rather than executing those rules.
+
+The description now serves three interaction shapes. The adapters still own
+their execution policy; a shared transport-neutral executor follows in the
+next release.
+
 ## The artifacts
 
 A `kobaapp.Definition` gathers the APIs of a service, its OpenAPI output and

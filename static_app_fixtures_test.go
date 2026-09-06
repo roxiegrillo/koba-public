@@ -4,26 +4,15 @@ import (
 	"net/http"
 
 	fb "github.com/roxiegrillo/koba/v2"
-	"github.com/roxiegrillo/koba/v2/kobaapp"
 	"github.com/roxiegrillo/koba/v2/internal/staticfixture"
+	"github.com/roxiegrillo/koba/v2/kobaapp"
 	"github.com/roxiegrillo/koba/v2/middleware"
-	"github.com/roxiegrillo/koba/v2/openapi"
 )
 
 func staticFixtureDefinition() kobaapp.Definition {
 	return kobaapp.Definition{
-		ID:   "static-fixture",
-		APIs: []any{(*staticfixture.API)(nil)},
-		OpenAPI: openapi.Config{
-			Title:   "Static Fixture API",
-			Version: "1.0.0",
-			SecuritySchemes: []openapi.SecurityScheme{{
-				Name:         "bearerAuth",
-				Type:         openapi.SecurityTypeHTTP,
-				Scheme:       "bearer",
-				BearerFormat: "JWT",
-			}},
-		},
+		ID:             "static-fixture",
+		APIs:           []any{(*staticfixture.API)(nil)},
 		OpenAPIOutput:  "internal/staticfixture/openapi.json",
 		ManifestOutput: "internal/staticfixture/koba.lock.json",
 		StaticTargets: []kobaapp.StaticTarget{{

@@ -90,3 +90,12 @@ func TestBuildProjectsNamedScalarParameterExampleAsJSONScalar(t *testing.T) {
 		t.Fatalf("example = %#v (%T), want int64(42)", example, example)
 	}
 }
+
+func TestContractSchemaDoesNotClearLegacyUniqueItemsCustomization(t *testing.T) {
+	ref := &openapi3.SchemaRef{Value: openapi3.NewArraySchema()}
+	ref.Value.UniqueItems = true
+	projected := contractSchema(ref, fb.InputOf[[]string]())
+	if !projected.Value.UniqueItems {
+		t.Fatal("empty contract cleared customizer-owned uniqueItems")
+	}
+}

@@ -13,6 +13,11 @@ import (
 
 // Build converts already-resolved neutral descriptions to OpenAPI.
 func Build(config Config, descriptions []fb.APIDescription) (*openapi3.T, error) {
+	var err error
+	config, err = configWithAPIDocument(config, descriptions)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(config.Title) == "" {
 		return nil, fmt.Errorf("koba/openapi: title is required")
 	}
@@ -79,15 +84,28 @@ func Build(config Config, descriptions []fb.APIDescription) (*openapi3.T, error)
 		// the same strict validation used by runtime execution plans.
 		api.Operations = append([]fb.OperationDescription(nil), api.Operations...)
 		for index := range api.Operations {
+			if api.Operations[index].HasKafkaConsumerTransport() {
+				continue
+			}
 			api.Operations[index].HTTPMethod = strings.ToUpper(strings.TrimSpace(api.Operations[index].HTTPMethod))
 		}
 		if err := fb.ValidateAPIDescription(api); err != nil {
 			return nil, fmt.Errorf("koba/openapi: invalid API description: %w", err)
 		}
-		if name := strings.TrimSpace(api.Name); name != "" {
+		hasHTTPOperation := false
+		for _, operation := range api.Operations {
+			if !operation.HasKafkaConsumerTransport() {
+				hasHTTPOperation = true
+				break
+			}
+		}
+		if name := strings.TrimSpace(api.Name); hasHTTPOperation && name != "" {
 			tagDescriptions[name] = strings.TrimSpace(api.Description)
 		}
 		for _, description := range api.Operations {
+			if description.HasKafkaConsumerTransport() {
+				continue
+			}
 			httpMethod := description.HTTPMethod
 			switch httpMethod {
 			case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -134,6 +152,9 @@ func Build(config Config, descriptions []fb.APIDescription) (*openapi3.T, error)
 	for _, name := range tagNames {
 		document.Tags = append(document.Tags, &openapi3.Tag{Name: name, Description: tagDescriptions[name]})
 	}
+	if err := pruneUnreachableSchemas(document); err != nil {
+		return nil, fmt.Errorf("koba/openapi: prune generated schemas: %w", err)
+	}
 
 	// openapi3gen deliberately serializes component usages as bare $refs. A
 	// programmatically built document therefore needs the same reference
@@ -146,4 +167,48 @@ func Build(config Config, descriptions []fb.APIDescription) (*openapi3.T, error)
 		return nil, fmt.Errorf("koba/openapi: validate generated document: %w", err)
 	}
 	return document, nil
+}
+
+func configWithAPIDocument(config Config, descriptions []fb.APIDescription) (Config, error) {
+	var document *fb.APIDocument
+	for _, description := range descriptions {
+		if description.Document == nil {
+			continue
+		}
+		if document != nil {
+			return Config{}, fmt.Errorf("koba/openapi: API document metadata is declared by more than one API")
+		}
+		document = description.Document
+	}
+	if document == nil {
+		return config, nil
+	}
+	if strings.TrimSpace(config.Title) != "" ||
+		strings.TrimSpace(config.Version) != "" ||
+		strings.TrimSpace(config.Description) != "" ||
+		len(config.Servers) != 0 ||
+		len(config.SecuritySchemes) != 0 ||
+		len(config.DefaultSecurity) != 0 ||
+		strings.TrimSpace(config.ExternalDocsURL) != "" {
+		return Config{}, fmt.Errorf("koba/openapi: document metadata must be declared in either APIDocumentation or Config, not both")
+	}
+	config.Title = document.Title
+	config.Version = document.Version
+	config.Description = document.Description
+	config.Servers = append([]Server(nil), document.Servers...)
+	config.SecuritySchemes = append([]SecurityScheme(nil), document.SecuritySchemes...)
+	config.DefaultSecurity = cloneSecurityRequirements(document.DefaultSecurity)
+	config.ExternalDocsURL = document.ExternalDocsURL
+	return config, nil
+}
+
+func cloneSecurityRequirements(requirements []fb.SecurityRequirement) []SecurityRequirement {
+	if requirements == nil {
+		return nil
+	}
+	cloned := make([]SecurityRequirement, len(requirements))
+	for index, requirement := range requirements {
+		cloned[index] = append(SecurityRequirement(nil), requirement...)
+	}
+	return cloned
 }

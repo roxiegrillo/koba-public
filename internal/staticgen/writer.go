@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	fb "github.com/roxiegrillo/koba/v2"
 )
@@ -63,12 +64,23 @@ func writeAPI(source *bytes.Buffer, imports *importSet, apiType reflect.Type, de
 			arguments = append(arguments, argument)
 		}
 		call := fmt.Sprintf("api.%s(%s)", operation.MethodName, strings.Join(arguments, ", "))
-		if len(outputs) == 0 {
+		returnsError := len(outputs) > 0 && outputs[len(outputs)-1] == reflect.TypeFor[error]()
+		if returnsError && operation.OutputType != nil {
+			fmt.Fprintf(source, "\t\t\t\tvalue, operationError := %s\n", call)
+			fmt.Fprintf(source, "\t\t\t\tif operationError != nil { return fb.InvocationResult{}, operationError }\n")
+		} else if returnsError {
+			fmt.Fprintf(source, "\t\t\t\tif operationError := %s; operationError != nil { return fb.InvocationResult{}, operationError }\n", call)
+			fmt.Fprintf(source, "\t\t\t\treturn fb.InvocationResult{}, nil\n")
+			fmt.Fprintf(source, "\t\t\t},\n")
+			continue
+		} else if operation.OutputType == nil {
 			fmt.Fprintf(source, "\t\t\t\t%s\n", call)
 			fmt.Fprintf(source, "\t\t\t\treturn fb.InvocationResult{}, nil\n")
 		} else {
 			fmt.Fprintf(source, "\t\t\t\tvalue := %s\n", call)
-			if outputs[0].Kind() == reflect.Pointer {
+		}
+		if operation.OutputType != nil {
+			if operation.OutputType.Kind() == reflect.Pointer {
 				fmt.Fprintf(source, "\t\t\t\tif value == nil { return fb.InvocationResult{Value: nil, HasValue: true}, nil }\n")
 				fmt.Fprintf(source, "\t\t\t\treturn fb.InvocationResult{Value: *value, HasValue: true}, nil\n")
 			} else {
@@ -84,7 +96,12 @@ func writeAPI(source *bytes.Buffer, imports *importSet, apiType reflect.Type, de
 }
 
 func writeDescription(source *bytes.Buffer, imports *importSet, description fb.APIDescription) error {
-	fmt.Fprintf(source, "fb.APIDescription{Name: %q, Description: %q, Operations: []fb.OperationDescription{", description.Name, description.Description)
+	fmt.Fprintf(source, "fb.APIDescription{Name: %q, Description: %q", description.Name, description.Description)
+	if description.Document != nil {
+		fmt.Fprintf(source, ", Document: ")
+		writeAPIDocument(source, description.Document)
+	}
+	fmt.Fprintf(source, ", Operations: []fb.OperationDescription{")
 	for _, operation := range description.Operations {
 		fmt.Fprintf(source, "{MethodName: %q, OperationID: %q, Route: %q, HTTPMethod: %q", operation.MethodName, operation.OperationID, operation.Route, operation.HTTPMethod)
 		if operation.InputType != nil {
@@ -101,7 +118,7 @@ func writeDescription(source *bytes.Buffer, imports *importSet, description fb.A
 			}
 			fmt.Fprintf(source, ", OutputType: reflect.TypeFor[%s]()", expression)
 		}
-		if len(operation.Contract.Inputs) != 0 || len(operation.Contract.Authorization.RequiredScopes) != 0 {
+		if len(operation.Contract.Inputs) != 0 || len(operation.Contract.Authorization.RequiredScopes) != 0 || operation.Contract.Transport.WebSocket != nil || operation.Contract.Transport.KafkaConsumer != nil {
 			fmt.Fprintf(source, ", Contract: ")
 			if err := writeOperationContract(source, imports, operation.Contract); err != nil {
 				return err
@@ -110,6 +127,12 @@ func writeDescription(source *bytes.Buffer, imports *importSet, description fb.A
 		if len(operation.RequestBindings) != 0 {
 			fmt.Fprintf(source, ", RequestBindings: ")
 			if err := writeRequestBindings(source, imports, operation.RequestBindings); err != nil {
+				return err
+			}
+		}
+		if len(operation.ResponseBindings) != 0 {
+			fmt.Fprintf(source, ", ResponseBindings: ")
+			if err := writeResponseBindings(source, imports, operation.ResponseBindings); err != nil {
 				return err
 			}
 		}
@@ -123,6 +146,54 @@ func writeDescription(source *bytes.Buffer, imports *importSet, description fb.A
 	return nil
 }
 
+func writeAPIDocument(source *bytes.Buffer, document *fb.APIDocument) {
+	fmt.Fprintf(
+		source,
+		"&fb.APIDocument{Title: %q, Version: %q, Description: %q, ExternalDocsURL: %q",
+		document.Title,
+		document.Version,
+		document.Description,
+		document.ExternalDocsURL,
+	)
+	if document.Servers != nil {
+		fmt.Fprintf(source, ", Servers: []fb.APIServer{")
+		for _, server := range document.Servers {
+			fmt.Fprintf(source, "{URL: %q, Description: %q},", server.URL, server.Description)
+		}
+		fmt.Fprintf(source, "}")
+	}
+	if document.SecuritySchemes != nil {
+		fmt.Fprintf(source, ", SecuritySchemes: []fb.APISecurityScheme{")
+		for _, scheme := range document.SecuritySchemes {
+			fmt.Fprintf(
+				source,
+				"{Name: %q, Type: %q, Description: %q, In: %q, Parameter: %q, Scheme: %q, BearerFormat: %q, ValuePrefix: %q},",
+				scheme.Name,
+				scheme.Type,
+				scheme.Description,
+				scheme.In,
+				scheme.Parameter,
+				scheme.Scheme,
+				scheme.BearerFormat,
+				scheme.ValuePrefix,
+			)
+		}
+		fmt.Fprintf(source, "}")
+	}
+	if document.DefaultSecurity != nil {
+		fmt.Fprintf(source, ", DefaultSecurity: []fb.SecurityRequirement{")
+		for _, requirement := range document.DefaultSecurity {
+			fmt.Fprintf(source, "{")
+			for _, scheme := range requirement {
+				fmt.Fprintf(source, "%q,", scheme)
+			}
+			fmt.Fprintf(source, "},")
+		}
+		fmt.Fprintf(source, "}")
+	}
+	fmt.Fprintf(source, "}")
+}
+
 func writeOperationContract(source *bytes.Buffer, imports *importSet, contract fb.OperationContract) error {
 	identifiers := make([]string, 0, len(contract.Inputs))
 	for identifier := range contract.Inputs {
@@ -130,6 +201,7 @@ func writeOperationContract(source *bytes.Buffer, imports *importSet, contract f
 	}
 	sort.Strings(identifiers)
 	fmt.Fprintf(source, "fb.OperationContract{")
+	wroteField := false
 	if len(identifiers) > 0 {
 		fmt.Fprintf(source, "Inputs: map[string]fb.InputContract{")
 	}
@@ -143,9 +215,10 @@ func writeOperationContract(source *bytes.Buffer, imports *importSet, contract f
 	}
 	if len(identifiers) > 0 {
 		fmt.Fprintf(source, "}")
+		wroteField = true
 	}
 	if contract.Authorization.RequiredScopes != nil {
-		if len(identifiers) > 0 {
+		if wroteField {
 			fmt.Fprintf(source, ", ")
 		}
 		fmt.Fprintf(
@@ -153,8 +226,72 @@ func writeOperationContract(source *bytes.Buffer, imports *importSet, contract f
 			"Authorization: fb.AuthorizationContract{RequiredScopes: %#v}",
 			contract.Authorization.RequiredScopes,
 		)
+		wroteField = true
+	}
+	if contract.Transport.WebSocket != nil || contract.Transport.KafkaConsumer != nil {
+		if wroteField {
+			fmt.Fprintf(source, ", ")
+		}
+		if err := writeTransportContract(source, imports, contract.Transport); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(source, "}")
+	return nil
+}
+
+func writeTransportContract(source *bytes.Buffer, imports *importSet, contract fb.TransportContract) error {
+	if consumer := contract.KafkaConsumer; consumer != nil {
+		fmt.Fprintf(source, "Transport: fb.KafkaConsumer(%q)", consumer.Topic)
+		return nil
+	}
+	webSocket := contract.WebSocket
+	if webSocket == nil {
+		return nil
+	}
+	clientType, err := imports.typeExpression(webSocket.Socket.ClientToServerType)
+	if err != nil {
+		return err
+	}
+	serverType, err := imports.typeExpression(webSocket.Socket.ServerToClientType)
+	if err != nil {
+		return err
+	}
+	if webSocket.Socket.ClientToServer == nil && webSocket.Socket.ServerToClient == nil {
+		fmt.Fprintf(
+			source,
+			"Transport: fb.WebSocket(fb.Socket[%s, %s]())",
+			clientType,
+			serverType,
+		)
+		return nil
+	}
+	fmt.Fprintf(
+		source,
+		"Transport: fb.WebSocket(fb.SocketContract{ClientToServerType: reflect.TypeFor[%s](), ServerToClientType: reflect.TypeFor[%s]()",
+		clientType,
+		serverType,
+	)
+	for _, message := range []struct {
+		name     string
+		contract *fb.SocketMessageContract
+	}{
+		{name: "ClientToServer", contract: webSocket.Socket.ClientToServer},
+		{name: "ServerToClient", contract: webSocket.Socket.ServerToClient},
+	} {
+		if message.contract == nil {
+			continue
+		}
+		fmt.Fprintf(source, ", %s: &fb.SocketMessageContract{Description: %q", message.name, message.contract.Description)
+		if message.contract.Bindings != nil {
+			fmt.Fprintf(source, ", Bindings: ")
+			if err := writeResponseBindings(source, imports, message.contract.Bindings); err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(source, "}")
+	}
+	fmt.Fprintf(source, "})")
 	return nil
 }
 
@@ -172,7 +309,304 @@ func writeRequestBindings(source *bytes.Buffer, imports *importSet, bindings []f
 		if err := writeInputContract(source, imports, binding.Input, true); err != nil {
 			return err
 		}
+		if binding.Documentation != nil {
+			fmt.Fprintf(
+				source,
+				", Documentation: &fb.BindingDocumentation{Description: %q",
+				binding.Documentation.Description,
+			)
+			if binding.Documentation.Deprecated {
+				fmt.Fprintf(source, ", Deprecated: true")
+			}
+			if binding.Documentation.Example != nil {
+				literal, err := documentationExampleLiteral(
+					binding.Documentation.Example,
+					binding.Input.GoType,
+					imports,
+				)
+				if err != nil {
+					return fmt.Errorf("binding %s %q documentation example: %w", binding.Source, binding.Name, err)
+				}
+				fmt.Fprintf(source, ", Example: %s", literal)
+			}
+			fmt.Fprintf(source, "}")
+		}
+		if len(binding.ObjectRules) != 0 {
+			fmt.Fprintf(source, ", ObjectRules: ")
+			if err := writeObjectRules(source, binding.ObjectRules); err != nil {
+				return fmt.Errorf("binding %s %q object rules: %w", binding.Source, binding.Name, err)
+			}
+		}
 		fmt.Fprintf(source, "},")
+	}
+	fmt.Fprintf(source, "}")
+	return nil
+}
+
+func writeResponseBindings(source *bytes.Buffer, imports *importSet, bindings []fb.ResponseBinding) error {
+	fmt.Fprintf(source, "[]fb.ResponseBinding{")
+	for _, binding := range bindings {
+		fmt.Fprintf(source, "{FieldPath: %#v, FieldIndex: %#v", binding.FieldPath, binding.FieldIndex)
+		if binding.ElementAt != nil {
+			fmt.Fprintf(source, ", ElementAt: %#v", binding.ElementAt)
+		}
+		fmt.Fprintf(source, ", Input: ")
+		if err := writeInputContract(source, imports, binding.Input, true); err != nil {
+			return err
+		}
+		if binding.Documentation != nil {
+			fmt.Fprintf(source, ", Documentation: &fb.BindingDocumentation{Description: %q", binding.Documentation.Description)
+			if binding.Documentation.Deprecated {
+				fmt.Fprintf(source, ", Deprecated: true")
+			}
+			if binding.Documentation.Example != nil {
+				literal, err := documentationExampleLiteral(
+					binding.Documentation.Example,
+					binding.Input.GoType,
+					imports,
+				)
+				if err != nil {
+					return fmt.Errorf("response binding %s documentation example: %w", strings.Join(binding.FieldPath, "."), err)
+				}
+				fmt.Fprintf(source, ", Example: %s", literal)
+			}
+			fmt.Fprintf(source, "}")
+		}
+		fmt.Fprintf(source, "},")
+	}
+	fmt.Fprintf(source, "}")
+	return nil
+}
+
+func writeBindingDocumentation(
+	source *bytes.Buffer,
+	imports *importSet,
+	documentation *fb.BindingDocumentation,
+	target reflect.Type,
+) error {
+	fmt.Fprintf(source, "&fb.BindingDocumentation{Description: %q", documentation.Description)
+	if documentation.Deprecated {
+		fmt.Fprintf(source, ", Deprecated: true")
+	}
+	if documentation.Example != nil {
+		literal, err := documentationExampleLiteral(documentation.Example, target, imports)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(source, ", Example: %s", literal)
+	}
+	fmt.Fprintf(source, "}")
+	return nil
+}
+
+func documentationExampleLiteral(value any, target reflect.Type, imports *importSet) (string, error) {
+	reflected := reflect.ValueOf(value)
+	if target.Kind() == reflect.Interface {
+		if !reflected.IsValid() {
+			return "nil", nil
+		}
+		// ValueOf exposes the concrete dynamic value. Keeping that concrete type
+		// is essential for defaults: collapsing a struct to map[string]any or a
+		// typed nil pointer to nil changes reflection/static behavior.
+		return documentationExampleLiteral(value, reflected.Type(), imports)
+	}
+	for reflected.IsValid() && reflected.Kind() == reflect.Interface {
+		reflected = reflected.Elem()
+	}
+	if !reflected.IsValid() {
+		return "nil", nil
+	}
+	if target == reflect.TypeFor[time.Time]() {
+		instant, ok := reflected.Interface().(time.Time)
+		if !ok {
+			return "", fmt.Errorf("example has type %s, want %s", reflected.Type(), target)
+		}
+		timePackage := imports.alias("time")
+		location := ""
+		switch instant.Location() {
+		case time.UTC:
+			location = timePackage + ".UTC"
+		case time.Local:
+			location = timePackage + ".Local"
+		default:
+			name, offset := instant.Zone()
+			location = fmt.Sprintf("%s.FixedZone(%q, %d)", timePackage, name, offset)
+		}
+		return fmt.Sprintf(
+			"%s.Date(%d, %d, %d, %d, %d, %d, %d, %s)",
+			timePackage,
+			instant.Year(),
+			instant.Month(),
+			instant.Day(),
+			instant.Hour(),
+			instant.Minute(),
+			instant.Second(),
+			instant.Nanosecond(),
+			location,
+		), nil
+	}
+	if target.Kind() == reflect.Pointer {
+		if reflected.Kind() == reflect.Pointer {
+			if reflected.IsNil() {
+				targetExpression, err := imports.typeExpression(target)
+				if err != nil {
+					return "", err
+				}
+				return "(" + targetExpression + ")(nil)", nil
+			}
+			reflected = reflected.Elem()
+		}
+		elementLiteral, err := documentationExampleLiteral(reflected.Interface(), target.Elem(), imports)
+		if err != nil {
+			return "", err
+		}
+		targetExpression, err := imports.typeExpression(target)
+		if err != nil {
+			return "", err
+		}
+		elementExpression, err := imports.typeExpression(target.Elem())
+		if err != nil {
+			return "", err
+		}
+		if target.Name() != "" {
+			return fmt.Sprintf(
+				"func() %s { var value %s = %s; return %s(&value) }()",
+				targetExpression,
+				elementExpression,
+				elementLiteral,
+				targetExpression,
+			), nil
+		}
+		return fmt.Sprintf(
+			"func() %s { var value %s = %s; return &value }()",
+			targetExpression,
+			elementExpression,
+			elementLiteral,
+		), nil
+	}
+	for reflected.Kind() == reflect.Pointer {
+		if reflected.IsNil() {
+			return "nil", nil
+		}
+		reflected = reflected.Elem()
+	}
+
+	switch target.Kind() {
+	case reflect.Struct:
+		if reflected.Kind() != reflect.Struct {
+			return "", fmt.Errorf("example has type %s, want %s", reflected.Type(), target)
+		}
+		typeExpression, err := imports.typeExpression(target)
+		if err != nil {
+			return "", err
+		}
+		var result strings.Builder
+		result.WriteString(typeExpression)
+		result.WriteByte('{')
+		for index := 0; index < target.NumField(); index++ {
+			field := target.Field(index)
+			if !field.IsExported() {
+				continue
+			}
+			literal, literalErr := documentationExampleLiteral(
+				reflected.Field(index).Interface(),
+				field.Type,
+				imports,
+			)
+			if literalErr != nil {
+				return "", fmt.Errorf("field %s: %w", field.Name, literalErr)
+			}
+			fmt.Fprintf(&result, "%s:%s,", field.Name, literal)
+		}
+		result.WriteByte('}')
+		return result.String(), nil
+	case reflect.Slice, reflect.Array:
+		if reflected.Kind() != reflect.Slice && reflected.Kind() != reflect.Array {
+			return "", fmt.Errorf("example has type %s, want %s", reflected.Type(), target)
+		}
+		typeExpression, err := imports.typeExpression(target)
+		if err != nil {
+			return "", err
+		}
+		if reflected.Kind() == reflect.Slice && reflected.IsNil() {
+			return typeExpression + "(nil)", nil
+		}
+		var result strings.Builder
+		result.WriteString(typeExpression)
+		result.WriteByte('{')
+		for index := 0; index < reflected.Len(); index++ {
+			literal, literalErr := documentationExampleLiteral(reflected.Index(index).Interface(), target.Elem(), imports)
+			if literalErr != nil {
+				return "", literalErr
+			}
+			result.WriteString(literal)
+			result.WriteByte(',')
+		}
+		result.WriteByte('}')
+		return result.String(), nil
+	case reflect.Map:
+		if reflected.Kind() != reflect.Map || target.Key().Kind() != reflect.String {
+			return "", fmt.Errorf("example has type %s, want string-keyed %s", reflected.Type(), target)
+		}
+		typeExpression, err := imports.typeExpression(target)
+		if err != nil {
+			return "", err
+		}
+		if reflected.IsNil() {
+			return typeExpression + "(nil)", nil
+		}
+		keys := reflected.MapKeys()
+		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		var result strings.Builder
+		result.WriteString(typeExpression)
+		result.WriteByte('{')
+		for _, key := range keys {
+			literal, literalErr := documentationExampleLiteral(reflected.MapIndex(key).Interface(), target.Elem(), imports)
+			if literalErr != nil {
+				return "", literalErr
+			}
+			fmt.Fprintf(&result, "%q:%s,", key.String(), literal)
+		}
+		result.WriteByte('}')
+		return result.String(), nil
+	default:
+		literal, err := anyLiteral(reflected.Interface())
+		if err != nil {
+			return "", err
+		}
+		if target.Name() != "" && target.PkgPath() != "" {
+			typeExpression, typeErr := imports.typeExpression(target)
+			if typeErr != nil {
+				return "", typeErr
+			}
+			return typeExpression + "(" + literal + ")", nil
+		}
+		return literal, nil
+	}
+}
+
+func writeObjectRules(source *bytes.Buffer, rules []fb.ObjectRule) error {
+	fmt.Fprintf(source, "[]fb.ObjectRule{")
+	for _, rule := range rules {
+		var constructor string
+		switch rule.Kind() {
+		case fb.ObjectRuleAtLeastOne:
+			constructor = "AtLeastOne"
+		case fb.ObjectRuleAllOrNone:
+			constructor = "AllOrNone"
+		case fb.ObjectRuleSameNullState:
+			constructor = "SameNullState"
+		default:
+			return fmt.Errorf("unsupported kind %q", rule.Kind())
+		}
+		fmt.Fprintf(source, "fb.%s(", constructor)
+		for index, field := range rule.Fields() {
+			if index > 0 {
+				fmt.Fprintf(source, ", ")
+			}
+			fmt.Fprintf(source, "%q", field)
+		}
+		fmt.Fprintf(source, "),")
 	}
 	fmt.Fprintf(source, "}")
 	return nil
@@ -189,6 +623,9 @@ func writeInputContract(source *bytes.Buffer, imports *importSet, input fb.Input
 	fmt.Fprintf(source, "{GoType: reflect.TypeFor[%s]()", typeExpression)
 	if input.Required {
 		fmt.Fprintf(source, ", Required: true")
+	}
+	if input.Nullable {
+		fmt.Fprintf(source, ", Nullable: true")
 	}
 	if input.HasDefault {
 		literal, err := typedContractLiteral(input.Default, input.GoType, imports)
@@ -221,6 +658,34 @@ func writeInputContract(source *bytes.Buffer, imports *importSet, input fb.Input
 	if input.MaxLength != nil {
 		fmt.Fprintf(source, ", MaxLength: func() *uint64 { value := uint64(%d); return &value }()", *input.MaxLength)
 	}
+	if input.MinItems != nil {
+		fmt.Fprintf(source, ", MinItems: func() *uint64 { value := uint64(%d); return &value }()", *input.MinItems)
+	}
+	if input.MaxItems != nil {
+		fmt.Fprintf(source, ", MaxItems: func() *uint64 { value := uint64(%d); return &value }()", *input.MaxItems)
+	}
+	if input.UniqueItems {
+		fmt.Fprintf(source, ", UniqueItems: true")
+	}
+	if input.Items != nil {
+		fmt.Fprintf(source, ", Items: &fb.CollectionItemContract{Input: ")
+		if err := writeInputContract(source, imports, input.Items.Input, true); err != nil {
+			return err
+		}
+		if input.Items.Documentation != nil {
+			fmt.Fprintf(source, ", Documentation: ")
+			if err := writeBindingDocumentation(source, imports, input.Items.Documentation, input.Items.Input.GoType); err != nil {
+				return err
+			}
+		}
+		if input.Items.Bindings != nil {
+			fmt.Fprintf(source, ", Bindings: ")
+			if err := writeResponseBindings(source, imports, input.Items.Bindings); err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(source, "}")
+	}
 	if input.Enum != nil {
 		fmt.Fprintf(source, ", Enum: []any{")
 		for _, value := range input.Enum {
@@ -243,6 +708,16 @@ func writeInputContract(source *bytes.Buffer, imports *importSet, input fb.Input
 }
 
 func typedContractLiteral(value any, target reflect.Type, imports *importSet) (string, error) {
+	if target.Kind() == reflect.Pointer {
+		return documentationExampleLiteral(value, target, imports)
+	}
+	valueType := target
+	for valueType.Kind() == reflect.Pointer {
+		valueType = valueType.Elem()
+	}
+	if !fbContractLiteralKind(valueType.Kind()) {
+		return documentationExampleLiteral(value, target, imports)
+	}
 	literal, err := anyLiteral(value)
 	if err != nil {
 		return "", err
@@ -257,8 +732,24 @@ func typedContractLiteral(value any, target reflect.Type, imports *importSet) (s
 	return typeExpression + "(" + literal + ")", nil
 }
 
+func fbContractLiteralKind(kind reflect.Kind) bool {
+	switch kind {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		return true
+	default:
+		return false
+	}
+}
+
 func writeOperationDocumentation(source *bytes.Buffer, imports *importSet, documentation fb.OperationDocumentation) error {
-	fmt.Fprintf(source, "fb.OperationDocumentation{Method: %q, SuccessStatus: %d, OperationID: %q, Summary: %q, Description: %q", documentation.Method, documentation.SuccessStatus, documentation.OperationID, documentation.Summary, documentation.Description)
+	fmt.Fprintf(source, "fb.OperationDocumentation{")
+	if documentation.Route != "" {
+		fmt.Fprintf(source, "Route: %q, ", documentation.Route)
+	}
+	fmt.Fprintf(source, "Method: %q, SuccessStatus: %d, OperationID: %q, Summary: %q, Description: %q", documentation.Method, documentation.SuccessStatus, documentation.OperationID, documentation.Summary, documentation.Description)
 	if documentation.Tags != nil {
 		fmt.Fprintf(source, ", Tags: %#v", documentation.Tags)
 	}
@@ -313,6 +804,13 @@ func writeOperationDocumentation(source *bytes.Buffer, imports *importSet, docum
 		for _, status := range statuses {
 			response := documentation.Responses[status]
 			fmt.Fprintf(source, "%d: {Description: %q", status, response.Description)
+			if response.GoType != nil {
+				expression, err := imports.typeExpression(response.GoType)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(source, ", GoType: reflect.TypeFor[%s]()", expression)
+			}
 			if response.Headers != nil {
 				headerNames := make([]string, 0, len(response.Headers))
 				for name := range response.Headers {

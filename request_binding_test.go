@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type requestBindingTestCoordinates struct {
@@ -119,6 +120,23 @@ func TestNormalizeRequestBindingsAcceptsRootBody(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequestBindingsRejectsNullableWireParameters(t *testing.T) {
+	type input struct {
+		Value *string
+	}
+	type contract struct {
+		Value Binding[*string]
+	}
+
+	_, err := normalizeRequestBindings(
+		contract{Value: Query[*string]("value", Nullable())},
+		reflect.TypeFor[input](),
+	)
+	if err == nil || !strings.Contains(err.Error(), "nullable is only supported for body and body-value bindings") {
+		t.Fatalf("normalizeRequestBindings() error = %v, want unsupported nullable query error", err)
+	}
+}
+
 type requestBindingTestBodyContract struct {
 	Title Binding[string]
 }
@@ -153,6 +171,77 @@ func TestNormalizeRequestBindingsWalksBodyObjectValues(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequestBindingsAcceptsOneAuthenticatedSubjectOutsideBody(t *testing.T) {
+	type payload struct {
+		Name string `json:"name"`
+	}
+	type input struct {
+		Subject string
+		Payload payload
+	}
+	type payloadContract struct {
+		Name Binding[string]
+	}
+	type contract struct {
+		Subject Binding[string]
+		Payload BodyObjectBinding[payloadContract]
+	}
+
+	bindings, err := normalizeRequestBindings(contract{
+		Subject: Subject(),
+		Payload: BodyObject(payloadContract{Name: Value[string](Required())}, Required()),
+	}, reflect.TypeFor[input]())
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+	}
+	if got, want := len(bindings), 3; got != want {
+		t.Fatalf("binding count = %d, want %d", got, want)
+	}
+	subject := bindings[0]
+	if subject.Source != BindingSourceSubject || subject.Name != "" || !reflect.DeepEqual(subject.FieldPath, []string{"Subject"}) || !subject.Input.Required || subject.Input.GoType != reflect.TypeFor[string]() {
+		t.Fatalf("subject binding = %#v", subject)
+	}
+	if subject.Input.MinLength == nil || *subject.Input.MinLength != 1 {
+		t.Fatalf("subject minimum length = %#v, want 1", subject.Input.MinLength)
+	}
+}
+
+func TestNormalizeRequestBindingsRejectsDuplicateOrBodySubject(t *testing.T) {
+	t.Run("duplicate", func(t *testing.T) {
+		type input struct {
+			First  string
+			Second string
+		}
+		type contract struct {
+			First  Binding[string]
+			Second Binding[string]
+		}
+		_, err := normalizeRequestBindings(
+			contract{First: Subject(), Second: Subject()},
+			reflect.TypeFor[input](),
+		)
+		if err == nil || !strings.Contains(err.Error(), "both bind the authenticated subject") {
+			t.Fatalf("normalizeRequestBindings() error = %v, want duplicate subject error", err)
+		}
+	})
+
+	t.Run("inside body", func(t *testing.T) {
+		type input struct {
+			Subject string `json:"subject"`
+		}
+		type contract struct {
+			Subject Binding[string]
+		}
+		_, err := normalizeRequestBindings(
+			BodyObject(contract{Subject: Subject()}, Required()),
+			reflect.TypeFor[input](),
+		)
+		if err == nil || !strings.Contains(err.Error(), "from inside a BodyObject") {
+			t.Fatalf("normalizeRequestBindings() error = %v, want body subject error", err)
+		}
+	})
+}
+
 func TestNormalizeRequestBindingsNormalizesRules(t *testing.T) {
 	type input struct{ PageSize int }
 	type contract struct{ PageSize Binding[int] }
@@ -167,6 +256,246 @@ func TestNormalizeRequestBindingsNormalizesRules(t *testing.T) {
 	inputContract := bindings[0].Input
 	if inputContract.Default != int(20) || inputContract.Minimum != int(1) || inputContract.Maximum != int(100) {
 		t.Fatalf("normalized rules = default %#v min %#v max %#v", inputContract.Default, inputContract.Minimum, inputContract.Maximum)
+	}
+}
+
+func TestBindingDocumentUsesValueSemanticsAndNormalizesMetadata(t *testing.T) {
+	type input struct{ PageSize int }
+	type contract struct{ PageSize Binding[int] }
+
+	original := Query[int]("page_size", Min(1), Max(100))
+	documented := original.Document(
+		"  Maximum number of records returned.  ",
+		Example(int8(20)),
+		Deprecated(),
+	)
+	if original.requestBindingMetadata().documentation != nil {
+		t.Fatal("Document mutated the original binding")
+	}
+
+	descriptor := contract{PageSize: documented}
+	bindings, err := normalizeRequestBindings(descriptor, reflect.TypeFor[input]())
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+	}
+	documentation := bindings[0].Documentation
+	if documentation == nil {
+		t.Fatal("normalized binding has no inline documentation")
+	}
+	if documentation.Description != "Maximum number of records returned." || !documentation.Deprecated {
+		t.Fatalf("normalized documentation = %#v", documentation)
+	}
+	if documentation.Example != int(20) {
+		t.Fatalf("normalized example = %#v, want int(20)", documentation.Example)
+	}
+
+	// A consumer may mutate a compiled plan without changing the authoring
+	// descriptor used to compile another plan.
+	documentation.Description = "changed"
+	again, err := normalizeRequestBindings(descriptor, reflect.TypeFor[input]())
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() second call returned an error: %v", err)
+	}
+	if got := again[0].Documentation.Description; got != "Maximum number of records returned." {
+		t.Fatalf("second normalized description = %q", got)
+	}
+}
+
+func TestBindingDocumentAcceptsHTTPParameterSources(t *testing.T) {
+	type input struct {
+		Query  string
+		Path   string
+		Header string
+		Cookie string
+	}
+	type contract struct {
+		Query  Binding[string]
+		Path   Binding[string]
+		Header Binding[string]
+		Cookie Binding[string]
+	}
+
+	bindings, err := normalizeRequestBindings(contract{
+		Query:  Query[string]("query").Document("Query parameter."),
+		Path:   Path[string]("path").Document("Path parameter."),
+		Header: Header[string]("X-Header").Document("Header parameter."),
+		Cookie: Cookie[string]("cookie").Document("Cookie parameter."),
+	}, reflect.TypeFor[input]())
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+	}
+	if got, want := len(bindings), 4; got != want {
+		t.Fatalf("binding count = %d, want %d", got, want)
+	}
+	for index, binding := range bindings {
+		if binding.Documentation == nil || binding.Documentation.Description == "" {
+			t.Errorf("binding %d documentation = %#v", index, binding.Documentation)
+		}
+	}
+}
+
+func TestBindingDocumentValidatesExamplesAgainstInputContract(t *testing.T) {
+	type input struct{ PageSize int }
+	type contract struct{ PageSize Binding[int] }
+
+	for _, test := range []struct {
+		name    string
+		example any
+		want    string
+	}{
+		{name: "incompatible type", example: "many", want: "cannot be represented by int"},
+		{name: "violates minimum", example: 0, want: "greater than or equal to 1"},
+		{name: "violates maximum", example: 101, want: "less than or equal to 100"},
+		{name: "violates enum", example: 50, want: "must be one of"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := normalizeRequestBindings(
+				contract{PageSize: Query[int]("page_size", Min(1), Max(100), OneOf(20, 100)).Document("Page size.", Example(test.example))},
+				reflect.TypeFor[input](),
+			)
+			if err == nil || !strings.Contains(err.Error(), "binding documentation example") || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("normalizeRequestBindings() error = %v, want inline example error containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBindingDocumentSupportsBodySourcesAndRejectsSubject(t *testing.T) {
+	t.Run("subject", func(t *testing.T) {
+		type input struct{ Subject string }
+		type contract struct{ Subject Binding[string] }
+		_, err := normalizeRequestBindings(
+			contract{Subject: Subject().Document("Authenticated subject.")},
+			reflect.TypeFor[input](),
+		)
+		if err == nil || !strings.Contains(err.Error(), `binding source "subject" does not support inline documentation`) {
+			t.Fatalf("normalizeRequestBindings() error = %v, want unsupported subject documentation error", err)
+		}
+	})
+
+	t.Run("body", func(t *testing.T) {
+		bindings, err := normalizeRequestBindings(
+			Body[string](Required()).Document("Request body."),
+			reflect.TypeFor[string](),
+		)
+		if err != nil {
+			t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+		}
+		if got := bindings[0].Documentation; got == nil || got.Description != "Request body." {
+			t.Fatalf("body documentation = %#v", got)
+		}
+	})
+
+	t.Run("body value", func(t *testing.T) {
+		type input struct{ Value string }
+		type contract struct{ Value Binding[string] }
+		bindings, err := normalizeRequestBindings(
+			BodyObject(contract{Value: Value[string]().Document("Body value.")}),
+			reflect.TypeFor[input](),
+		)
+		if err != nil {
+			t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+		}
+		if got := bindings[1].Documentation; got == nil || got.Description != "Body value." {
+			t.Fatalf("body-value documentation = %#v", got)
+		}
+	})
+
+	t.Run("blank description", func(t *testing.T) {
+		type input struct{ Value string }
+		type contract struct{ Value Binding[string] }
+		_, err := normalizeRequestBindings(
+			contract{Value: Query[string]("value").Document(" \t\n ")},
+			reflect.TypeFor[input](),
+		)
+		if err == nil || !strings.Contains(err.Error(), "binding documentation description is required") {
+			t.Fatalf("normalizeRequestBindings() error = %v, want blank description error", err)
+		}
+	})
+}
+
+func TestCompositeBindingDocumentationExampleIsOwned(t *testing.T) {
+	example := map[string]any{"labels": []any{"original"}}
+	bindings, err := normalizeRequestBindings(
+		Body[map[string]any]().Document("Composite body.", Example(example)),
+		reflect.TypeFor[map[string]any](),
+	)
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+	}
+	example["labels"].([]any)[0] = "mutated"
+	got := bindings[0].Documentation.Example.(map[string]any)["labels"].([]any)[0]
+	if got != "original" {
+		t.Fatalf("compiled example aliases author value: %v", got)
+	}
+}
+
+func TestBindingDocumentationPreservesTimeExample(t *testing.T) {
+	example := time.Date(2026, time.September, 6, 12, 30, 0, 123, time.UTC)
+	bindings, err := normalizeRequestBindings(
+		Body[time.Time]().Document("Timestamp.", Example(example)),
+		reflect.TypeFor[time.Time](),
+	)
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+	}
+	if got, ok := bindings[0].Documentation.Example.(time.Time); !ok || !got.Equal(example) {
+		t.Fatalf("compiled time example = %#v, want %v", bindings[0].Documentation.Example, example)
+	}
+}
+
+type privateStateExample struct {
+	Labels map[string]string `json:"labels"`
+	cache  string
+}
+
+func TestBindingDocumentationPreservesPrivateStateAndOwnsPublicMutableData(t *testing.T) {
+	example := privateStateExample{
+		Labels: map[string]string{"mode": "original"},
+		cache:  "opaque",
+	}
+	bindings, err := normalizeRequestBindings(
+		Body[privateStateExample]().Document("Domain value.", Example(example)),
+		reflect.TypeFor[privateStateExample](),
+	)
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+	}
+	example.Labels["mode"] = "mutated"
+	got := bindings[0].Documentation.Example.(privateStateExample)
+	if got.cache != "opaque" || got.Labels["mode"] != "original" {
+		t.Fatalf("compiled private-state example = %#v", got)
+	}
+}
+
+func TestNormalizeResolvedRequestBindingsNormalizesInlineDocumentation(t *testing.T) {
+	type input struct{ PageSize int }
+
+	original := &BindingDocumentation{
+		Description: "  Maximum number of records returned.  ",
+		Deprecated:  true,
+		Example:     int8(20),
+	}
+	bindings, err := normalizeResolvedRequestBindings([]RequestBinding{{
+		Source:        BindingSourceQuery,
+		Name:          "page_size",
+		FieldPath:     []string{"PageSize"},
+		FieldIndex:    []int{0},
+		Input:         InputOf[int](Min(1), Max(100)),
+		Documentation: original,
+	}}, reflect.TypeFor[input]())
+	if err != nil {
+		t.Fatalf("normalizeResolvedRequestBindings() returned an error: %v", err)
+	}
+	documentation := bindings[0].Documentation
+	if documentation == original {
+		t.Fatal("normalizeResolvedRequestBindings() retained the caller's documentation pointer")
+	}
+	if documentation.Description != "Maximum number of records returned." || !documentation.Deprecated || documentation.Example != int(20) {
+		t.Fatalf("normalized documentation = %#v", documentation)
+	}
+	if original.Description != "  Maximum number of records returned.  " || original.Example != int8(20) {
+		t.Fatalf("normalizeResolvedRequestBindings() mutated input documentation: %#v", original)
 	}
 }
 
@@ -326,6 +655,67 @@ func TestNormalizeResolvedRequestBindingsRejectsFieldPathIndexDrift(t *testing.T
 	}
 }
 
+func TestNormalizeResolvedRequestBindingsRejectsInvalidSubjectBindings(t *testing.T) {
+	type payload struct{ Subject string }
+	type input struct {
+		Subject string
+		Other   string
+		Payload payload
+	}
+	requiredSubject := func(path string, index []int) RequestBinding {
+		return RequestBinding{
+			Source:     BindingSourceSubject,
+			FieldPath:  []string{path},
+			FieldIndex: index,
+			Input:      InputOf[string](Required(), MinLength(1)),
+		}
+	}
+
+	for _, test := range []struct {
+		name     string
+		bindings []RequestBinding
+		want     string
+	}{
+		{
+			name: "duplicate",
+			bindings: []RequestBinding{
+				requiredSubject("Subject", []int{0}),
+				requiredSubject("Other", []int{1}),
+			},
+			want: "both bind the authenticated subject",
+		},
+		{
+			name: "named",
+			bindings: []RequestBinding{{
+				Source: BindingSourceSubject, Name: "sub", FieldPath: []string{"Subject"}, FieldIndex: []int{0}, Input: InputOf[string](Required()),
+			}},
+			want: "unexpected name",
+		},
+		{
+			name: "optional",
+			bindings: []RequestBinding{{
+				Source: BindingSourceSubject, FieldPath: []string{"Subject"}, FieldIndex: []int{0}, Input: InputOf[string](),
+			}},
+			want: "must be required",
+		},
+		{
+			name: "inside body",
+			bindings: []RequestBinding{
+				{Source: BindingSourceBody, FieldPath: []string{"Payload"}, FieldIndex: []int{2}, Input: InputOf[payload](Required())},
+				{Source: BindingSourceSubject, FieldPath: []string{"Payload", "Subject"}, FieldIndex: []int{2, 0}, Input: InputOf[string](Required())},
+			},
+			want: "inside body object",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := normalizeResolvedRequestBindings(test.bindings, reflect.TypeFor[input]())
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("normalizeResolvedRequestBindings() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateAPIDescriptionRejectsUnboundParameterInRequestMode(t *testing.T) {
 	type input struct{ PageSize int }
 	err := ValidateAPIDescription(APIDescription{Operations: []OperationDescription{{
@@ -363,5 +753,86 @@ func TestNormalizeOperationContractPreservesRequestCompanion(t *testing.T) {
 	}
 	if !reflect.DeepEqual(normalized.Request, descriptor) {
 		t.Fatalf("normalized request = %#v, want %#v", normalized.Request, descriptor)
+	}
+}
+
+type objectRuleNestedInput struct {
+	Note string `json:"note"`
+}
+
+type objectRuleInput struct {
+	Name    string                `json:"name"`
+	Details objectRuleNestedInput `json:"details"`
+	Any     any                   `json:"any"`
+	Hidden  string                `json:"-"`
+}
+
+type objectRuleDescriptor struct {
+	Name Binding[string]
+}
+
+func TestNormalizeRequestBindingsNormalizesBodyObjectRules(t *testing.T) {
+	descriptor := BodyObject(objectRuleDescriptor{
+		Name: Value[string](),
+	}).WithRules(
+		AtLeastOne(" Name ", " Details.Note "),
+		AllOrNone("Name", "Details.Note"),
+		SameNullState("Name", "Details.Note"),
+	)
+
+	bindings, err := normalizeRequestBindings(descriptor, reflect.TypeFor[objectRuleInput]())
+	if err != nil {
+		t.Fatalf("normalizeRequestBindings() returned an error: %v", err)
+	}
+	if len(bindings) == 0 || bindings[0].Source != BindingSourceBody {
+		t.Fatalf("bindings = %#v, want a body binding first", bindings)
+	}
+	rules := bindings[0].ObjectRules
+	if len(rules) != 3 {
+		t.Fatalf("object rules = %#v, want three rules", rules)
+	}
+	if rules[0].Kind() != ObjectRuleAtLeastOne || !reflect.DeepEqual(rules[0].Fields(), []string{"Name", "Details.Note"}) {
+		t.Fatalf("first object rule = %#v/%v", rules[0], rules[0].Fields())
+	}
+	if rules[1].Kind() != ObjectRuleAllOrNone || !reflect.DeepEqual(rules[1].Fields(), []string{"Name", "Details.Note"}) {
+		t.Fatalf("second object rule = %#v/%v", rules[1], rules[1].Fields())
+	}
+	if rules[2].Kind() != ObjectRuleSameNullState || !reflect.DeepEqual(rules[2].Fields(), []string{"Name", "Details.Note"}) {
+		t.Fatalf("third object rule = %#v/%v", rules[2], rules[2].Fields())
+	}
+
+	fields := rules[0].Fields()
+	fields[0] = "mutated"
+	if rules[0].Fields()[0] != "Name" {
+		t.Fatal("ObjectRule.Fields exposed mutable rule state")
+	}
+}
+
+func TestNormalizeRequestBindingsRejectsInvalidBodyObjectRules(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		rule ObjectRule
+		want string
+	}{
+		{name: "zero rule", rule: ObjectRule{}, want: "unsupported kind"},
+		{name: "empty at least one", rule: AtLeastOne(), want: "requires at least 1 field"},
+		{name: "short all or none", rule: AllOrNone("Name"), want: "requires at least 2 field"},
+		{name: "short same null state", rule: SameNullState("Name"), want: "requires at least 2 field"},
+		{name: "untyped same null state", rule: SameNullState("Name", "Any"), want: `field "Any" must have a concrete Go type`},
+		{name: "duplicate", rule: AtLeastOne("Name", "Name"), want: `field "Name" is repeated`},
+		{name: "missing", rule: AtLeastOne("Missing"), want: `field "Missing" does not exist`},
+		{name: "excluded", rule: AtLeastOne("Hidden"), want: `field "Hidden" is excluded from JSON`},
+		{name: "empty segment", rule: AtLeastOne("Details..Note"), want: "contains an empty segment"},
+		{name: "non struct", rule: AtLeastOne("Name.Value"), want: "traverses non-struct type string"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := normalizeRequestBindings(
+				BodyObject(objectRuleDescriptor{Name: Value[string]()}).WithRules(test.rule),
+				reflect.TypeFor[objectRuleInput](),
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("normalizeRequestBindings() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

@@ -24,21 +24,17 @@
         ],
         "type": "object"
       },
-      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.ComposeDetails": {
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Configuration": {
         "properties": {
-          "note": {
-            "type": "string"
-          }
-        },
-        "type": "object"
-      },
-      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.ComposePayload": {
-        "properties": {
-          "details": {
-            "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.ComposeDetails"
+          "attributes": {
+            "additionalProperties": {},
+            "type": "object"
           },
-          "name": {
-            "type": "string"
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Tag"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -58,6 +54,79 @@
           }
         },
         "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Tag": {
+        "properties": {
+          "details": {
+            "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.TagDetails"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.TagDetails": {
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.WebSocketInput.connectStaticFixture.Y29ubmVjdFN0YXRpY0ZpeHR1cmU.ClientToServer": {
+        "description": "Message accepted from the fixture client.",
+        "properties": {
+          "message": {
+            "description": "Client-authored fixture message.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.WebSocketOutput.connectStaticFixture.Y29ubmVjdFN0YXRpY0ZpeHR1cmU.ServerToClient": {
+        "description": "Message delivered by the fixture server.",
+        "properties": {
+          "id": {
+            "description": "Stable fixture response identifier.",
+            "format": "fixture-id",
+            "type": "string"
+          },
+          "message": {
+            "description": "Echoed fixture message.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "message"
+        ],
+        "type": "object"
+      },
+      "github.com_roxiegrillo_koba_v2_types.ProbeStatus": {
+        "description": "Status returned by the framework-owned operational probes.",
+        "properties": {
+          "status": {
+            "description": "One of ok, ready, or not_ready according to the requested probe.",
+            "enum": [
+              "ok",
+              "ready",
+              "not_ready"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -76,6 +145,7 @@
   "paths": {
     "/fixtures": {
       "post": {
+        "description": "Required OAuth scopes: create:fixtures.",
         "operationId": "createStaticFixture",
         "requestBody": {
           "content": {
@@ -168,6 +238,166 @@
         ]
       }
     },
+    "/fixtures/configuration": {
+      "put": {
+        "operationId": "configureStaticFixture",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "attributes": {
+                    "additionalProperties": {},
+                    "default": {
+                      "presentation": {
+                        "labels": []
+                      }
+                    },
+                    "description": "Free-form configuration attributes.",
+                    "type": "object"
+                  },
+                  "tags": {
+                    "default": [],
+                    "description": "Configured tags.",
+                    "items": {
+                      "description": "Configured tag.",
+                      "properties": {
+                        "details": {
+                          "properties": {
+                            "code": {
+                              "description": "Nested tag code.",
+                              "format": "slug",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "code"
+                          ],
+                          "type": "object"
+                        },
+                        "kind": {
+                          "description": "Tag kind.",
+                          "enum": [
+                            "system",
+                            "user"
+                          ],
+                          "type": "string"
+                        },
+                        "name": {
+                          "description": "Tag name.",
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "details",
+                        "kind",
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array",
+                    "uniqueItems": true
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Configuration"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Configure",
+        "tags": [
+          "static-fixture"
+        ]
+      }
+    },
+    "/fixtures/connect": {
+      "get": {
+        "operationId": "connectStaticFixture",
+        "responses": {
+          "101": {
+            "description": "WebSocket connection established",
+            "headers": {
+              "Connection": {
+                "description": "Upgrade confirmation.",
+                "schema": {
+                  "enum": [
+                    "Upgrade"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Upgrade": {
+                "description": "Selected upgraded protocol.",
+                "schema": {
+                  "enum": [
+                    "websocket"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "summary": "Connect fixture transport",
+        "tags": [
+          "static-fixture"
+        ],
+        "x-websocket": {
+          "clientToServer": {
+            "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.WebSocketInput.connectStaticFixture.Y29ubmVjdFN0YXRpY0ZpeHR1cmU.ClientToServer"
+          },
+          "encoding": "json",
+          "frameType": "text",
+          "serverToClient": {
+            "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.WebSocketOutput.connectStaticFixture.Y29ubmVjdFN0YXRpY0ZpeHR1cmU.ServerToClient"
+          }
+        }
+      }
+    },
     "/fixtures/ids": {
       "put": {
         "operationId": "replaceStaticFixtureIDs",
@@ -176,9 +406,14 @@
             "application/json": {
               "schema": {
                 "items": {
+                  "description": "Fixture identifier.",
+                  "minLength": 1,
                   "type": "string"
                 },
-                "type": "array"
+                "maxItems": 3,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
               }
             }
           },
@@ -385,10 +620,144 @@
           "content": {
             "application/json": {
               "schema": {
+                "allOf": [
+                  {
+                    "oneOf": [
+                      {
+                        "allOf": [
+                          {
+                            "required": [
+                              "lat"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "required": [
+                              "lon"
+                            ],
+                            "type": "object"
+                          }
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "not": {
+                          "anyOf": [
+                            {
+                              "required": [
+                                "lat"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "required": [
+                                "lon"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      }
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "anyOf": [
+                      {
+                        "not": {
+                          "anyOf": [
+                            {
+                              "properties": {
+                                "lat": {
+                                  "enum": [
+                                    null
+                                  ],
+                                  "format": "double",
+                                  "maximum": 90,
+                                  "minimum": -90,
+                                  "nullable": true,
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "lat"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "properties": {
+                                "lon": {
+                                  "enum": [
+                                    null
+                                  ],
+                                  "format": "double",
+                                  "maximum": 180,
+                                  "minimum": -180,
+                                  "nullable": true,
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "lon"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      },
+                      {
+                        "not": {
+                          "anyOf": [
+                            {
+                              "properties": {
+                                "lat": {
+                                  "format": "double",
+                                  "maximum": 90,
+                                  "minimum": -90,
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "lat"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "properties": {
+                                "lon": {
+                                  "format": "double",
+                                  "maximum": 180,
+                                  "minimum": -180,
+                                  "type": "number"
+                                }
+                              },
+                              "required": [
+                                "lon"
+                              ],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "type": "object"
+                      }
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "description": "Composition payload.",
+                "example": {
+                  "details": {
+                    "note": "nested fixture"
+                  },
+                  "name": "fixture"
+                },
                 "properties": {
                   "details": {
                     "properties": {
                       "note": {
+                        "description": "Composition note.",
                         "maxLength": 128,
                         "type": "string"
                       }
@@ -398,7 +767,23 @@
                     ],
                     "type": "object"
                   },
+                  "lat": {
+                    "format": "double",
+                    "maximum": 90,
+                    "minimum": -90,
+                    "nullable": true,
+                    "type": "number"
+                  },
+                  "lon": {
+                    "format": "double",
+                    "maximum": 180,
+                    "minimum": -180,
+                    "nullable": true,
+                    "type": "number"
+                  },
                   "name": {
+                    "description": "Composition name.",
+                    "example": "fixture",
                     "maxLength": 64,
                     "minLength": 1,
                     "type": "string"
@@ -412,7 +797,7 @@
               }
             }
           },
-          "description": "Deeply nested composition payload.",
+          "description": "Composition payload.",
           "required": true
         },
         "responses": {
@@ -420,7 +805,19 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_internal_staticfixture_domain.Response"
+                  "properties": {
+                    "id": {
+                      "description": "Composed fixture identifier.",
+                      "example": "fixture-1",
+                      "maxLength": 64,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id"
+                  ],
+                  "type": "object"
                 }
               }
             },
@@ -551,12 +948,92 @@
           "static-fixture"
         ]
       }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Confirms that the process can serve HTTP requests.",
+        "operationId": "healthz_check",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_types.ProbeStatus"
+                }
+              }
+            },
+            "description": "Process is alive"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [],
+        "summary": "Check liveness",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/readyz": {
+      "get": {
+        "description": "Confirms that every configured dependency check passes before the service receives traffic.",
+        "operationId": "readyz_check",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_types.ProbeStatus"
+                }
+              }
+            },
+            "description": "Service is ready for traffic"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal server error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/github.com_roxiegrillo_koba_v2_types.ProbeStatus"
+                }
+              }
+            },
+            "description": "A required dependency is not ready"
+          }
+        },
+        "security": [],
+        "summary": "Check readiness",
+        "tags": [
+          "system"
+        ]
+      }
     }
   },
   "tags": [
     {
       "description": "Reflection and generated runtime parity fixture.",
       "name": "static-fixture"
+    },
+    {
+      "description": "Framework-owned liveness and dependency readiness probes.",
+      "name": "system"
     }
   ]
 }

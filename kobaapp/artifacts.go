@@ -37,14 +37,6 @@ func buildArtifacts(definition Definition) ([]generatedArtifact, error) {
 		return nil, fmt.Errorf("koba/kobaapp: OpenAPI and manifest outputs must differ")
 	}
 
-	openAPIContents, err := openapi.GenerateJSON(definition.OpenAPI, false, definition.APIs...)
-	if err != nil {
-		return nil, err
-	}
-	artifacts := []generatedArtifact{{
-		kind: "openapi", path: definition.OpenAPIOutput, contents: openAPIContents,
-	}}
-	seenOutputs := map[string]string{normalizedPath(definition.OpenAPIOutput): "openapi"}
 	serviceAPIs := make(map[string]any, len(definition.APIs))
 	for index, api := range definition.APIs {
 		identity, err := apiIdentity(api)
@@ -56,6 +48,18 @@ func buildArtifacts(definition Definition) ([]generatedArtifact, error) {
 		}
 		serviceAPIs[identity] = api
 	}
+	if err := validateServiceAPIs(serviceAPIs); err != nil {
+		return nil, err
+	}
+
+	openAPIContents, err := openapi.GenerateJSON(definition.OpenAPI, false, definition.APIs...)
+	if err != nil {
+		return nil, err
+	}
+	artifacts := []generatedArtifact{{
+		kind: "openapi", path: definition.OpenAPIOutput, contents: openAPIContents,
+	}}
+	seenOutputs := map[string]string{normalizedPath(definition.OpenAPIOutput): "openapi"}
 	coveredAPIs := make(map[string]struct{}, len(serviceAPIs))
 
 	for index, target := range definition.StaticTargets {

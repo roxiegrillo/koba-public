@@ -17,3 +17,11 @@ What is true of an operation's boundary is stated beside it as a value.
 Typed requests, per-field rules, and the scopes a caller must hold live in
 the contract instead of in handlers or middleware conventions, and the
 contract is checked against the signature it serves.
+
+## [1.2.0] (2026-09-06)
+
+The contract reaches every wire. Subject binding supplies the authenticated
+caller as a typed input; directional socket contracts describe a WebSocket
+conversation; Kafka consumers are compiled from the same operation plan.
+Response and message companions extend typed field descriptions to values
+returned or exchanged, while transport configuration remains explicit.

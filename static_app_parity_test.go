@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/websocket"
 	fb "github.com/roxiegrillo/koba/v2"
+	fberrors "github.com/roxiegrillo/koba/v2/errors"
 	"github.com/roxiegrillo/koba/v2/internal/staticfixture"
 	"github.com/roxiegrillo/koba/v2/internal/staticfixture/domain"
 )
@@ -17,6 +19,27 @@ func TestStaticFixtureHTTPParity(t *testing.T) {
 	app := newStaticFixtureApp()
 	app.AddApi(api)
 	router := app.(fb.WithRouter).Router()
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	connection, upgradeResponse, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http")+"/fixtures/connect",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("dial fixture WebSocket: %v (response %#v)", err, upgradeResponse)
+	}
+	defer connection.Close()
+	if err := connection.WriteJSON(domain.WebSocketInput{Message: "hello"}); err != nil {
+		t.Fatalf("write fixture WebSocket message: %v", err)
+	}
+	var socketResponse domain.WebSocketOutput
+	if err := connection.ReadJSON(&socketResponse); err != nil {
+		t.Fatalf("read fixture WebSocket response: %v", err)
+	}
+	if socketResponse.ID != "fixture" || socketResponse.Message != "hello" {
+		t.Fatalf("fixture WebSocket response = %#v", socketResponse)
+	}
 
 	created := httptest.NewRecorder()
 	createRequest := httptest.NewRequest(http.MethodPost, "/fixtures", strings.NewReader(`{"name":"fixture-http"}`))
@@ -29,6 +52,15 @@ func TestStaticFixtureHTTPParity(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &response); err != nil || response.ID != "fixture-http" {
 		t.Fatalf("POST response = %#v, error = %v", response, err)
 	}
+	api.CreateError = fberrors.MakeError(http.StatusConflict, "fixture already exists")
+	failedCreate := httptest.NewRecorder()
+	failedCreateRequest := httptest.NewRequest(http.MethodPost, "/fixtures", strings.NewReader(`{"name":"fixture-conflict"}`))
+	failedCreateRequest.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(failedCreate, failedCreateRequest)
+	if got, want := failedCreate.Code, http.StatusConflict; got != want || !strings.Contains(failedCreate.Body.String(), "fixture already exists") || strings.Contains(failedCreate.Body.String(), "fixture-conflict") {
+		t.Fatalf("failed POST status/body = %d/%q, want 409 error without response value", got, failedCreate.Body.String())
+	}
+	api.CreateError = nil
 
 	nilResponse := httptest.NewRecorder()
 	router.ServeHTTP(nilResponse, httptest.NewRequest(http.MethodGet, "/fixtures/nil", nil))
@@ -44,6 +76,13 @@ func TestStaticFixtureHTTPParity(t *testing.T) {
 	if got, want := api.DeletedID, "fixture-http"; got != want {
 		t.Fatalf("Delete path parameter = %q, want %q", got, want)
 	}
+	api.DeleteError = fberrors.MakeNotFoundError("fixture missing")
+	failedDelete := httptest.NewRecorder()
+	router.ServeHTTP(failedDelete, httptest.NewRequest(http.MethodDelete, "/fixtures/missing", nil))
+	if got, want := failedDelete.Code, http.StatusNotFound; got != want || !strings.Contains(failedDelete.Body.String(), "fixture missing") {
+		t.Fatalf("failed DELETE status/body = %d/%q, want 404 operation error", got, failedDelete.Body.String())
+	}
+	api.DeleteError = nil
 
 	inspected := httptest.NewRecorder()
 	inspectRequest := httptest.NewRequest(http.MethodGet, "/fixtures/fixture-http/inspect", nil)
@@ -83,6 +122,21 @@ func TestStaticFixtureHTTPParity(t *testing.T) {
 		t.Fatalf("composed request = count=%d request=%#v", api.ComposeCount, api.Composed)
 	}
 
+	invalidPair := httptest.NewRecorder()
+	invalidPairRequest := httptest.NewRequest(
+		http.MethodPatch,
+		"/fixtures/fixture-http/compose",
+		strings.NewReader(`{"name":"partial coordinates","details":{"note":"invalid"},"lat":19.4}`),
+	)
+	invalidPairRequest.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(invalidPair, invalidPairRequest)
+	if got, want := invalidPair.Code, http.StatusBadRequest; got != want || !strings.Contains(invalidPair.Body.String(), "lat, lon must be provided together") {
+		t.Fatalf("partial coordinate pair = %d %s, want 400 all-or-none error", got, invalidPair.Body.String())
+	}
+	if api.ComposeCount != 1 {
+		t.Fatalf("invalid coordinate pair invoked Compose; count = %d", api.ComposeCount)
+	}
+
 	invalidComposition := httptest.NewRecorder()
 	invalidComposeRequest := httptest.NewRequest(
 		http.MethodPatch,
@@ -112,5 +166,42 @@ func TestStaticFixtureHTTPParity(t *testing.T) {
 	router.ServeHTTP(updated, updateRequest)
 	if got, want := updated.Code, http.StatusOK; got != want || strings.TrimSpace(updated.Body.String()) != `{"id":"updated"}` {
 		t.Fatalf("PATCH status/body = %d/%q, want 200/update response", got, updated.Body.String())
+	}
+}
+
+func TestStructuralBodyLimitErrorParity(t *testing.T) {
+	api := &staticfixture.API{}
+	app := newStaticFixtureApp()
+	app.(fb.WithMiddlewareUse).Use(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		request.Body = http.MaxBytesReader(writer, request.Body, 8)
+	}))
+	app.AddApi(api)
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/fixtures",
+		strings.NewReader(`{"name":"too large"}`),
+	)
+	request.ContentLength = -1
+	request.TransferEncoding = []string{"chunked"}
+	request.Header.Set("Content-Type", "application/json")
+	app.(http.Handler).ServeHTTP(response, request)
+
+	if got, want := response.Code, http.StatusRequestEntityTooLarge; got != want {
+		t.Fatalf("streaming POST status = %d, want %d: %s", got, want, response.Body.String())
+	}
+	var body struct {
+		Status int    `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Status != http.StatusRequestEntityTooLarge || body.Error != "request_entity_too_large" {
+		t.Fatalf("body = %+v, want 413 request_entity_too_large", body)
+	}
+	if api.CreateCount != 0 {
+		t.Fatalf("oversized structural body invoked Create; count = %d", api.CreateCount)
 	}
 }

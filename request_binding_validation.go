@@ -19,6 +19,7 @@ func normalizeResolvedRequestBindings(
 	result := make([]RequestBinding, 0, len(bindings))
 	wire := make(map[string]string)
 	bodyIndex := -1
+	subjectIndex := -1
 	for index, binding := range bindings {
 		path := displayRequestFieldPath(binding.FieldPath)
 		targetType, err := requestTypeAtIndex(inputType, binding.FieldIndex)
@@ -50,6 +51,11 @@ func normalizeResolvedRequestBindings(
 			return nil, fmt.Errorf("request binding %q: %w", path, err)
 		}
 		binding.Input = normalized
+		documentation, err := normalizeBindingDocumentation(binding.Documentation, normalized, binding.Source)
+		if err != nil {
+			return nil, fmt.Errorf("request binding %q: %w", path, err)
+		}
+		binding.Documentation = documentation
 		binding.FieldPath = append([]string(nil), binding.FieldPath...)
 		binding.FieldIndex = append([]int(nil), binding.FieldIndex...)
 		switch binding.Source {
@@ -68,6 +74,24 @@ func normalizeResolvedRequestBindings(
 			if binding.Source == BindingSourcePath && !binding.Input.Required {
 				return nil, fmt.Errorf("path request binding %q must be required", path)
 			}
+		case BindingSourceSubject:
+			if binding.Name != "" {
+				return nil, fmt.Errorf("subject request binding %q has an unexpected name %q", path, binding.Name)
+			}
+			if targetType != reflect.TypeFor[string]() {
+				return nil, fmt.Errorf("request binding %q uses %s as an authenticated subject; want string", path, targetType)
+			}
+			if !binding.Input.Required {
+				return nil, fmt.Errorf("subject request binding %q must be required", path)
+			}
+			if subjectIndex >= 0 {
+				return nil, fmt.Errorf(
+					"request bindings %q and %q both bind the authenticated subject",
+					displayRequestFieldPath(result[subjectIndex].FieldPath),
+					path,
+				)
+			}
+			subjectIndex = index
 		case BindingSourceBody:
 			if bodyIndex >= 0 {
 				return nil, fmt.Errorf(
@@ -76,10 +100,18 @@ func normalizeResolvedRequestBindings(
 					path,
 				)
 			}
+			rules, err := normalizeObjectRules(binding.ObjectRules, targetType)
+			if err != nil {
+				return nil, fmt.Errorf("request binding %q: %w", path, err)
+			}
+			binding.ObjectRules = rules
 			bodyIndex = index
 		case BindingSourceValue:
 		default:
 			return nil, fmt.Errorf("request binding %q has unsupported source %q", path, binding.Source)
+		}
+		if binding.Source != BindingSourceBody && len(binding.ObjectRules) != 0 {
+			return nil, fmt.Errorf("request binding %q uses object rules outside a body object", path)
 		}
 		result = append(result, binding)
 	}
@@ -93,16 +125,27 @@ func normalizeResolvedRequestBindings(
 	}
 	bodyPath := result[bodyIndex].FieldPath
 	for _, binding := range result {
-		if binding.Source != BindingSourceValue {
-			continue
+		switch binding.Source {
+		case BindingSourceValue:
+			if !requestPathHasPrefix(binding.FieldPath, bodyPath) || len(binding.FieldPath) == len(bodyPath) {
+				return nil, fmt.Errorf(
+					"request binding %q is outside body object %q",
+					displayRequestFieldPath(binding.FieldPath),
+					displayRequestFieldPath(bodyPath),
+				)
+			}
+		case BindingSourceSubject:
+			if requestPathHasPrefix(binding.FieldPath, bodyPath) {
+				return nil, fmt.Errorf(
+					"subject request binding %q is inside body object %q",
+					displayRequestFieldPath(binding.FieldPath),
+					displayRequestFieldPath(bodyPath),
+				)
+			}
 		}
-		if !requestPathHasPrefix(binding.FieldPath, bodyPath) || len(binding.FieldPath) == len(bodyPath) {
-			return nil, fmt.Errorf(
-				"request binding %q is outside body object %q",
-				displayRequestFieldPath(binding.FieldPath),
-				displayRequestFieldPath(bodyPath),
-			)
-		}
+	}
+	if err := validateRequestBodyDefault(result, inputType); err != nil {
+		return nil, fmt.Errorf("request body default: %w", err)
 	}
 	return result, nil
 }

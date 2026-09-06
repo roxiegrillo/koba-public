@@ -2,30 +2,14 @@ package koba
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"reflect"
 	"strings"
 	"testing"
 
 	httprouter "github.com/roxiegrillo/koba/v2/internal/httprouter"
 )
-
-type textArrayScalar [16]byte
-
-func (*textArrayScalar) UnmarshalText([]byte) error { return nil }
-
-type namedTextScalar string
-
-func (value *namedTextScalar) UnmarshalText(text []byte) error {
-	if string(text) != "valid" {
-		return fmt.Errorf("want valid")
-	}
-	*value = "decoded"
-	return nil
-}
 
 type structuralBindingAPI struct {
 	calls            int
@@ -137,31 +121,6 @@ func TestHTTPStructuralBindingRejectsInvalidOrAmbiguousScalarsBeforeInvocation(t
 				t.Fatalf("API invoked %d times for invalid input", api.calls)
 			}
 		})
-	}
-}
-
-func TestHTTPScalarTypesRejectStructuredTextUnmarshalers(t *testing.T) {
-	if err := validateHTTPScalarType(reflect.TypeFor[textArrayScalar]()); err == nil || !strings.Contains(err.Error(), "does not support HTTP scalar decoding") {
-		t.Fatalf("validateHTTPScalarType(textArrayScalar) error = %v, want unsupported scalar", err)
-	}
-	if _, err := coerceHTTPScalar("anything", reflect.TypeFor[textArrayScalar]()); err == nil || !strings.Contains(err.Error(), "does not support HTTP scalar decoding") {
-		t.Fatalf("coerceHTTPScalar(textArrayScalar) error = %v, want unsupported scalar", err)
-	}
-}
-
-func TestHTTPScalarTypesSupportNamedPrimitiveTextUnmarshalers(t *testing.T) {
-	if err := validateHTTPScalarType(reflect.TypeFor[namedTextScalar]()); err != nil {
-		t.Fatalf("validateHTTPScalarType(namedTextScalar) returned an error: %v", err)
-	}
-	value, err := coerceHTTPScalar("valid", reflect.TypeFor[namedTextScalar]())
-	if err != nil {
-		t.Fatalf("coerceHTTPScalar(namedTextScalar) returned an error: %v", err)
-	}
-	if got, want := value.(namedTextScalar), namedTextScalar("decoded"); got != want {
-		t.Fatalf("coerced value = %q, want %q", got, want)
-	}
-	if _, err := coerceHTTPScalar("invalid", reflect.TypeFor[namedTextScalar]()); err == nil || !strings.Contains(err.Error(), "want valid") {
-		t.Fatalf("invalid named scalar error = %v, want unmarshaler error", err)
 	}
 }
 

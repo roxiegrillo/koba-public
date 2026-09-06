@@ -26,6 +26,13 @@ func newSchemaGenerator(schemas openapi3.Schemas, customizer SchemaCustomizer) *
 			if valueType == reflect.TypeFor[fbtypes.Time]() {
 				*schema = *openapi3.NewDateTimeSchema()
 			}
+			if valueType == reflect.TypeFor[fbtypes.ProbeStatus]() {
+				schema.Description = "Status returned by the framework-owned operational probes."
+				if status := schema.Properties["status"]; status != nil && status.Value != nil {
+					status.Value.Description = "One of ok, ready, or not_ready according to the requested probe."
+					status.Value.Enum = []any{"ok", "ready", "not_ready"}
+				}
+			}
 			if customizer != nil {
 				if err := customizer(SchemaContext{Name: name, GoType: valueType, StructTag: tag, Schema: schema}); err != nil {
 					return err
@@ -83,6 +90,85 @@ func responseSchemaForType(generator *openapi3gen.Generator, schemas openapi3.Sc
 		Nullable: true,
 		AllOf:    openapi3.SchemaRefs{ref},
 	}}, nil
+}
+
+// responsePresenceSchema derives JSON response presence from the declared Go
+// wire type without mutating shared component schemas. A field without
+// omitempty is serialized as a property and is therefore required; pointer
+// nullability remains represented by the reflected child schema.
+func responsePresenceSchema(
+	ref *openapi3.SchemaRef,
+	valueType reflect.Type,
+	schemas openapi3.Schemas,
+	seen map[reflect.Type]struct{},
+) (*openapi3.SchemaRef, error) {
+	for valueType.Kind() == reflect.Pointer {
+		valueType = valueType.Elem()
+	}
+	if _, exists := seen[valueType]; exists {
+		return ref, nil
+	}
+	clone, err := mutableSchemaRef(ref, schemas)
+	if err != nil {
+		return nil, err
+	}
+	switch valueType.Kind() {
+	case reflect.Struct:
+		if valueType == reflect.TypeFor[time.Time]() || valueType == reflect.TypeFor[fbtypes.Time]() {
+			return clone, nil
+		}
+		seen[valueType] = struct{}{}
+		defer delete(seen, valueType)
+		for _, field := range reflect.VisibleFields(valueType) {
+			if field.PkgPath != "" {
+				continue
+			}
+			jsonName, included := openAPIJSONFieldName(field)
+			if !included || (field.Anonymous && strings.Split(field.Tag.Get("json"), ",")[0] == "") {
+				continue
+			}
+			property := clone.Value.Properties[jsonName]
+			if property == nil {
+				continue
+			}
+			if !jsonTagHasOption(field.Tag.Get("json"), "omitempty") {
+				clone.Value.Required = appendUnique(clone.Value.Required, jsonName)
+			}
+			child, childErr := responsePresenceSchema(property, field.Type, schemas, seen)
+			if childErr != nil {
+				return nil, childErr
+			}
+			clone.Value.Properties[jsonName] = child
+		}
+		sort.Strings(clone.Value.Required)
+	case reflect.Array, reflect.Slice:
+		if clone.Value.Items != nil {
+			items, childErr := responsePresenceSchema(clone.Value.Items, valueType.Elem(), schemas, seen)
+			if childErr != nil {
+				return nil, childErr
+			}
+			clone.Value.Items = items
+		}
+	case reflect.Map:
+		if clone.Value.AdditionalProperties.Schema != nil {
+			additional, childErr := responsePresenceSchema(clone.Value.AdditionalProperties.Schema, valueType.Elem(), schemas, seen)
+			if childErr != nil {
+				return nil, childErr
+			}
+			clone.Value.AdditionalProperties.Schema = additional
+		}
+	}
+	return clone, nil
+}
+
+func jsonTagHasOption(tag string, option string) bool {
+	parts := strings.Split(tag, ",")
+	for _, part := range parts[1:] {
+		if part == option {
+			return true
+		}
+	}
+	return false
 }
 
 func applyBindingConstraints(valueType reflect.Type, ref *openapi3.SchemaRef, schemas openapi3.Schemas, seen map[reflect.Type]struct{}) {

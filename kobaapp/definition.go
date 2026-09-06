@@ -22,8 +22,10 @@ type StaticTarget struct {
 }
 
 // Definition is the single build-time description of one Koba app.
-// API values may be typed nil pointers when Routes and APIDocumentation are
-// metadata-only, as recommended by the framework convention.
+// APIs contains every transport-bound API owned by the
+// service, including HTTP, WebSocket, and Kafka consumers. API values may be
+// typed nil pointers when their metadata methods do not dereference the
+// receiver, as recommended by the framework convention.
 type Definition struct {
 	ID             string
 	APIs           []any

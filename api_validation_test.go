@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+type textArrayScalar [16]byte
+
+func (*textArrayScalar) UnmarshalText([]byte) error { return nil }
+
 func TestDescribeAPIRejectsDuplicateAndInvalidMetadata(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -57,6 +61,15 @@ func TestDescribeAPIRejectsDuplicateAndInvalidMetadata(t *testing.T) {
 				}},
 			}},
 			wantError: "resolved success status",
+		},
+		{
+			name: "success response type override",
+			documentation: APIDocumentation{Operations: map[string]OperationDocumentation{
+				"First": {Responses: map[int]ResponseDocumentation{
+					http.StatusNoContent: {GoType: reflect.TypeFor[map[string]string]()},
+				}},
+			}},
+			wantError: "cannot override the function return type",
 		},
 		{
 			name: "case-insensitive duplicate headers",
@@ -195,6 +208,22 @@ func TestDescribeAPIRejectsDuplicateAndInvalidMetadata(t *testing.T) {
 				t.Fatalf("DescribeAPI() error = %q, want it to contain %q", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestDescribeAPIAllowsTypedNonSuccessResponse(t *testing.T) {
+	_, err := DescribeAPI(validationFixtureAPI{documentation: APIDocumentation{
+		Operations: map[string]OperationDocumentation{
+			"First": {Responses: map[int]ResponseDocumentation{
+				http.StatusServiceUnavailable: {
+					Description: "Dependency unavailable",
+					GoType:      reflect.TypeFor[map[string]string](),
+				},
+			}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("DescribeAPI() rejected a typed non-success response: %v", err)
 	}
 }
 
@@ -376,5 +405,56 @@ func TestDescribeAPIValidatesContractBindings(t *testing.T) {
 				t.Fatalf("DescribeAPI() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateAPIDescriptionRejectsParameterDocumentedInlineAndLegacy(t *testing.T) {
+	type input struct{ Search string }
+
+	err := ValidateAPIDescription(APIDescription{Operations: []OperationDescription{{
+		MethodName:  "Search",
+		OperationID: "search",
+		Route:       "/items",
+		HTTPMethod:  http.MethodGet,
+		InputType:   reflect.TypeFor[input](),
+		RequestBindings: []RequestBinding{{
+			Source:        BindingSourceQuery,
+			Name:          "q",
+			FieldPath:     []string{"Search"},
+			FieldIndex:    []int{0},
+			Input:         InputOf[string](),
+			Documentation: &BindingDocumentation{Description: "Search term."},
+		}},
+		Documentation: OperationDocumentation{
+			Parameters: []ParameterDocumentation{{
+				Name:        "q",
+				In:          ParameterInQuery,
+				Description: "Legacy search term.",
+			}},
+		},
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "documents parameter q both inline and in ParameterDocumentation") {
+		t.Fatalf("ValidateAPIDescription() error = %v, want duplicate documentation error", err)
+	}
+}
+
+func TestValidateAPIDescriptionRejectsBodyDocumentedInlineAndLegacy(t *testing.T) {
+	type input struct{ Name string }
+
+	err := ValidateAPIDescription(APIDescription{Operations: []OperationDescription{{
+		MethodName:  "Create",
+		OperationID: "create",
+		Route:       "/items",
+		HTTPMethod:  http.MethodPost,
+		InputType:   reflect.TypeFor[input](),
+		RequestBindings: []RequestBinding{{
+			Source:        BindingSourceBody,
+			Input:         InputOf[input](Required()),
+			Documentation: &BindingDocumentation{Description: "Inline body."},
+		}},
+		Documentation: OperationDocumentation{RequestBodyDescription: "Legacy body."},
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "documents the request body both inline and in RequestBodyDescription") {
+		t.Fatalf("ValidateAPIDescription() error = %v, want duplicate body documentation error", err)
 	}
 }

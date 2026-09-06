@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	internalhttpscalar "github.com/roxiegrillo/koba/v2/internal/transport/httpscalar"
 )
 
 // ValidateAPIDescription checks the resolved structural and HTTP metadata
@@ -20,11 +22,30 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 		if operation.Contract.Request != nil {
 			return fmt.Errorf("koba: %s contains an unresolved request companion", operation.MethodName)
 		}
+		if operation.Contract.Response != nil {
+			return fmt.Errorf("koba: %s contains an unresolved response companion", operation.MethodName)
+		}
 		if len(operation.Contract.Inputs) != 0 && len(operation.RequestBindings) != 0 {
 			return fmt.Errorf("koba: %s mixes legacy contract inputs with request bindings", operation.MethodName)
 		}
 		if _, err := normalizeResolvedRequestBindings(operation.RequestBindings, operation.InputType); err != nil {
 			return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
+		}
+		if _, err := normalizeResolvedResponseBindings(operation.ResponseBindings, operation.OutputType); err != nil {
+			return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
+		}
+		if _, err := normalizeTransportContract(operation.Contract.Transport); err != nil {
+			return fmt.Errorf("koba: %s transport: %w", operation.MethodName, err)
+		}
+		if previous, duplicate := operationIDs[operation.OperationID]; duplicate {
+			return fmt.Errorf("koba: duplicate operation ID %q on %s and %s", operation.OperationID, previous, operation.MethodName)
+		}
+		operationIDs[operation.OperationID] = operation.MethodName
+		if operation.HasKafkaConsumerTransport() {
+			if err := validateKafkaConsumerOperation(operation); err != nil {
+				return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
+			}
+			continue
 		}
 		switch operation.HTTPMethod {
 		case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -35,10 +56,6 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 				operation.HTTPMethod,
 			)
 		}
-		if previous, duplicate := operationIDs[operation.OperationID]; duplicate {
-			return fmt.Errorf("koba: duplicate operation ID %q on %s and %s", operation.OperationID, previous, operation.MethodName)
-		}
-		operationIDs[operation.OperationID] = operation.MethodName
 		seenParameters := make(map[string]struct{}, len(operation.Documentation.Parameters))
 		boundInputs := make(map[string]struct{}, len(operation.Contract.Inputs))
 		for _, identifier := range sortedMapKeys(operation.Contract.Inputs) {
@@ -63,6 +80,13 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 			if len(operation.RequestBindings) != 0 && !hasRequestBinding {
 				return fmt.Errorf(
 					"koba: %s parameter %s has no request binding",
+					operation.MethodName,
+					parameter.Name,
+				)
+			}
+			if hasRequestBinding && requestBinding.Documentation != nil {
+				return fmt.Errorf(
+					"koba: %s documents parameter %s both inline and in ParameterDocumentation",
 					operation.MethodName,
 					parameter.Name,
 				)
@@ -94,7 +118,7 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 						parameter.Name,
 					)
 				}
-				if err := validateHTTPScalarType(input.GoType); err != nil {
+				if err := internalhttpscalar.ValidateType(input.GoType); err != nil {
 					return fmt.Errorf("koba: %s parameter %s: %w", operation.MethodName, parameter.Name, err)
 				}
 				if _, duplicate := boundInputs[parameter.ContractInput]; duplicate {
@@ -161,6 +185,12 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 				return fmt.Errorf("koba: %s contract input %q has no HTTP parameter binding", operation.MethodName, identifier)
 			}
 		}
+		if body, exists := operation.BodyBinding(); exists && body.Documentation != nil && strings.TrimSpace(operation.Documentation.RequestBodyDescription) != "" {
+			return fmt.Errorf(
+				"koba: %s documents the request body both inline and in RequestBodyDescription",
+				operation.MethodName,
+			)
+		}
 		if operation.Documentation.Public && operation.Documentation.Security != nil {
 			return fmt.Errorf("koba: %s cannot set both Public and Security", operation.MethodName)
 		}
@@ -176,19 +206,42 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 		if operation.Documentation.Public && len(requiredScopes) > 0 {
 			return fmt.Errorf("koba: %s cannot set both Public and RequiredScopes", operation.MethodName)
 		}
+		if operation.Documentation.Public && operation.HasSubjectBinding() {
+			return fmt.Errorf("koba: %s cannot set both Public and an authenticated subject binding", operation.MethodName)
+		}
 		if err := validateRequiredScopes(requiredScopes); err != nil {
 			return fmt.Errorf("koba: %s %w", operation.MethodName, err)
 		}
 		for index, requirement := range operation.Documentation.Security {
-			if len(requirement) == 0 && len(requiredScopes) > 0 {
-				return fmt.Errorf("koba: %s security requirement %d allows anonymous access but RequiredScopes is nonempty", operation.MethodName, index+1)
+			if len(requirement) == 0 && operation.RequiresAuthentication() {
+				if len(requiredScopes) > 0 {
+					return fmt.Errorf("koba: %s security requirement %d allows anonymous access but RequiredScopes is nonempty", operation.MethodName, index+1)
+				}
+				return fmt.Errorf("koba: %s security requirement %d allows anonymous access but an authenticated subject is required", operation.MethodName, index+1)
 			}
 		}
-		if operation.Documentation.Security != nil && len(operation.Documentation.Security) == 0 && len(requiredScopes) > 0 {
-			return fmt.Errorf("koba: %s has an empty Security override but RequiredScopes is nonempty", operation.MethodName)
+		if operation.Documentation.Security != nil && len(operation.Documentation.Security) == 0 && operation.RequiresAuthentication() {
+			if len(requiredScopes) > 0 {
+				return fmt.Errorf("koba: %s has an empty Security override but RequiredScopes is nonempty", operation.MethodName)
+			}
+			return fmt.Errorf("koba: %s has an empty Security override but an authenticated subject is required", operation.MethodName)
+		}
+		if operation.HasWebSocketTransport() {
+			if operation.HTTPMethod != http.MethodGet {
+				return fmt.Errorf("koba: %s WebSocket transport requires GET", operation.MethodName)
+			}
+			if operation.Documentation.SuccessStatus != 0 {
+				return fmt.Errorf("koba: %s WebSocket transport derives HTTP 101 and cannot override SuccessStatus", operation.MethodName)
+			}
+			if operation.OutputType != nil {
+				return fmt.Errorf("koba: %s WebSocket transport operation cannot return a response value", operation.MethodName)
+			}
+			if _, hasBody := operation.BodyBinding(); hasBody || (len(operation.RequestBindings) == 0 && operation.InputType != nil) {
+				return fmt.Errorf("koba: %s WebSocket transport operation cannot bind an HTTP request body", operation.MethodName)
+			}
 		}
 		successStatus := operation.ResolvedSuccessStatus()
-		if successStatus < http.StatusOK || successStatus > 299 {
+		if !operation.HasWebSocketTransport() && (successStatus < http.StatusOK || successStatus > 299) {
 			return fmt.Errorf(
 				"koba: %s success status must be between 200 and 299; got %d",
 				operation.MethodName,
@@ -203,6 +256,13 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 			)
 		}
 		for status, response := range operation.Documentation.Responses {
+			if status == successStatus && response.GoType != nil {
+				return fmt.Errorf(
+					"koba: %s response HTTP %d cannot override the function return type",
+					operation.MethodName,
+					status,
+				)
+			}
 			if status == successStatus || (status >= 400 && status <= 599) {
 				if err := validateResponseHeaders(operation.MethodName, status, response.Headers); err != nil {
 					return err
@@ -216,6 +276,47 @@ func validateOperationDescriptions(operations []OperationDescription) error {
 				successStatus,
 			)
 		}
+	}
+	return nil
+}
+
+func validateKafkaConsumerOperation(operation OperationDescription) error {
+	consumer := operation.Contract.Transport.KafkaConsumer
+	if consumer == nil {
+		return fmt.Errorf("Kafka consumer transport is missing")
+	}
+	if operation.Contract.Transport.WebSocket != nil {
+		return fmt.Errorf("Kafka consumer cannot also use WebSocket")
+	}
+	if operation.Route != "" || operation.HTTPMethod != "" {
+		return fmt.Errorf("Kafka consumer operation cannot declare an HTTP route or method")
+	}
+	if operation.InputType == nil {
+		return fmt.Errorf("Kafka consumer operation requires one message input")
+	}
+	if _, err := operation.ResolvedKafkaMessageEncoding(); err != nil {
+		return err
+	}
+	if operation.OutputType != nil {
+		return fmt.Errorf("Kafka consumer operation cannot return a response value")
+	}
+	if len(operation.Contract.Inputs) != 0 || len(operation.RequestBindings) != 0 || len(operation.ResponseBindings) != 0 {
+		return fmt.Errorf("Kafka consumer message bindings are not supported yet; use the typed function argument")
+	}
+	if len(operation.Contract.Authorization.RequiredScopes) != 0 {
+		return fmt.Errorf("Kafka consumer operation cannot require HTTP authorization scopes")
+	}
+	documentation := operation.Documentation
+	if strings.TrimSpace(documentation.Route) != "" ||
+		strings.TrimSpace(documentation.Method) != "" ||
+		documentation.SuccessStatus != 0 ||
+		len(documentation.Parameters) != 0 ||
+		strings.TrimSpace(documentation.RequestBodyDescription) != "" ||
+		len(documentation.Responses) != 0 ||
+		len(documentation.RequiredScopes) != 0 ||
+		documentation.Security != nil ||
+		documentation.Public {
+		return fmt.Errorf("Kafka consumer operation cannot declare HTTP-specific documentation")
 	}
 	return nil
 }

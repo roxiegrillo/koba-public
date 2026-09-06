@@ -5,6 +5,8 @@ import (
 	"regexp"
 
 	httprouter "github.com/roxiegrillo/koba/v2/internal/httprouter"
+
+	internalhttpadapter "github.com/roxiegrillo/koba/v2/internal/transport/httpadapter"
 )
 
 func (app *kobaApp) Router() *httprouter.Engine {
@@ -22,12 +24,16 @@ func (app *kobaApp) RegisteredAPIDescriptions() []APIDescription {
 	return append([]APIDescription(nil), app.apis...)
 }
 
+func (app *kobaApp) DefaultProbesEnabled() bool {
+	return !app.defaultProbesDisabled
+}
+
 func (app *kobaApp) Use(handlers ...http.Handler) {
-	useWithRouter(app.r, handlers...)
+	internalhttpadapter.Use(app.r, handlers...)
 }
 
 func (app *kobaApp) UseGroup(r *regexp.Regexp, handlers ...http.Handler) {
-	addMapMiddleware(r, app.middleware, handlers...)
+	app.middleware.Add(r, handlers...)
 }
 
 func (app *kobaApp) AddApi(api interface{}) {
@@ -37,21 +43,26 @@ func (app *kobaApp) AddApi(api interface{}) {
 	}
 	if app.authenticationMiddleware == nil {
 		for _, operation := range compiled.Description.Operations {
-			if len(operation.ResolvedRequiredScopes()) == 0 {
+			if operation.HasKafkaConsumerTransport() {
 				continue
 			}
-			panic("koba: operation " + operation.MethodName + " requires scopes but no authentication middleware is configured; use WithAuthenticationMiddleware")
+			if !operation.RequiresAuthentication() {
+				continue
+			}
+			panic("koba: operation " + operation.MethodName + " requires authentication but no authentication middleware is configured; use WithAuthenticationMiddleware")
 		}
 	}
 	for _, operation := range compiled.Description.Operations {
-		requiredScopes := operation.ResolvedRequiredScopes()
+		if operation.HasKafkaConsumerTransport() {
+			continue
+		}
 		routeName := operation.Route
 		handler := makeOperationHandler(operation, compiled.Invokers[operation.MethodName])
 		router := app.r.Group(routeName)
-		if len(requiredScopes) > 0 && !app.authenticationMiddlewareIsGlobal {
-			useWithRouter(router, app.authenticationMiddleware)
+		if operation.RequiresAuthentication() && !app.authenticationMiddlewareIsGlobal {
+			internalhttpadapter.Use(router, app.authenticationMiddleware)
 		}
-		addMapRouter(routeName, router, app.middleware)
+		app.middleware.Apply(routeName, router)
 		switch operation.HTTPMethod {
 		case http.MethodPost:
 			router.POST("", handler)

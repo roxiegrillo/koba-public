@@ -1,6 +1,8 @@
 package openapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -24,11 +26,15 @@ func renderOperation(
 ) (*openapi3.Operation, error) {
 	documentation := description.Documentation
 	requiredScopes := description.ResolvedRequiredScopes()
+	requiresAuthentication := description.RequiresAuthentication()
 	if documentation.Public && documentation.Security != nil {
 		return nil, fmt.Errorf("koba/openapi: %s cannot set both Public and Security", description.MethodName)
 	}
 	if documentation.Public && len(requiredScopes) > 0 {
 		return nil, fmt.Errorf("koba/openapi: %s cannot set both Public and RequiredScopes", description.MethodName)
+	}
+	if documentation.Public && description.HasSubjectBinding() {
+		return nil, fmt.Errorf("koba/openapi: %s cannot set both Public and an authenticated subject binding", description.MethodName)
 	}
 	tags := append([]string(nil), documentation.Tags...)
 	if len(tags) == 0 && strings.TrimSpace(api.Name) != "" {
@@ -40,7 +46,7 @@ func renderOperation(
 	operation := &openapi3.Operation{
 		OperationID: description.OperationID,
 		Summary:     strings.TrimSpace(documentation.Summary),
-		Description: strings.TrimSpace(documentation.Description),
+		Description: operationDescription(documentation.Description, requiredScopes),
 		Tags:        tags,
 		Deprecated:  documentation.Deprecated,
 		Responses:   openapi3.NewResponses(),
@@ -49,6 +55,22 @@ func renderOperation(
 		operation.Extensions = map[string]any{
 			"x-required-scopes": append([]string(nil), requiredScopes...),
 		}
+	}
+	if description.HasWebSocketTransport() {
+		extension, err := renderWebSocketExtension(
+			generator,
+			schemas,
+			config.SchemaCustomizer,
+			*description.Contract.Transport.WebSocket,
+			description.OperationID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("koba/openapi: %s WebSocket contract: %w", description.MethodName, err)
+		}
+		if operation.Extensions == nil {
+			operation.Extensions = make(map[string]any)
+		}
+		operation.Extensions["x-websocket"] = extension
 	}
 	if operation.Summary == "" {
 		operation.Summary = splitIdentifier(description.MethodName)
@@ -65,9 +87,13 @@ func renderOperation(
 
 	requestBodyType := description.InputType
 	requestBodyRequired := true
+	var requestBodyBinding fb.RequestBinding
+	hasRequestBodyBinding := false
 	if len(description.RequestBindings) != 0 {
 		body, exists := description.BodyBinding()
 		if exists {
+			requestBodyBinding = body
+			hasRequestBodyBinding = true
 			requestBodyType = body.Input.GoType
 			requestBodyRequired = body.Input.Required
 		} else {
@@ -80,37 +106,60 @@ func renderOperation(
 			return nil, fmt.Errorf("koba/openapi: %s request schema: %w", description.MethodName, err)
 		}
 		if len(description.RequestBindings) != 0 {
-			body, _ := description.BodyBinding()
-			schema, err = requestBodyContractSchema(schema, body, description.RequestBindings, schemas)
+			schema, err = requestBodyContractSchema(schema, requestBodyBinding, description.RequestBindings, schemas)
 			if err != nil {
 				return nil, fmt.Errorf("koba/openapi: %s request contract: %w", description.MethodName, err)
 			}
-			if hasContractSchemaConstraints(body.Input) {
-				schema = contractSchema(schema, body.Input)
+			schema, err = documentedInputContractSchema(
+				schema,
+				requestBodyBinding.Input,
+				requestBodyBinding.Documentation,
+				schemas,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("koba/openapi: %s request body contract: %w", description.MethodName, err)
 			}
+		}
+		requestBodyDescription := strings.TrimSpace(documentation.RequestBodyDescription)
+		if hasRequestBodyBinding && requestBodyBinding.Documentation != nil {
+			requestBodyDescription = requestBodyBinding.Documentation.Description
 		}
 		operation.RequestBody = &openapi3.RequestBodyRef{Value: openapi3.NewRequestBody().
 			WithRequired(requestBodyRequired).
-			WithDescription(strings.TrimSpace(documentation.RequestBodyDescription)).
+			WithDescription(requestBodyDescription).
 			WithJSONSchemaRef(schema)}
 	}
 
 	success := openapi3.NewResponse().WithDescription("Successful response")
-	if description.OutputType != nil {
+	if description.HasWebSocketTransport() {
+		success = webSocketUpgradeResponse()
+	} else if description.OutputType != nil {
 		schema, err := responseSchemaForType(generator, schemas, description.OutputType)
 		if err != nil {
 			return nil, fmt.Errorf("koba/openapi: %s response schema: %w", description.MethodName, err)
+		}
+		if len(description.ResponseBindings) != 0 {
+			schema, err = responseContractSchema(schema, description.OutputType, description.ResponseBindings, schemas)
+			if err != nil {
+				return nil, fmt.Errorf("koba/openapi: %s response contract: %w", description.MethodName, err)
+			}
 		}
 		success.WithJSONSchemaRef(schema)
 	}
 	successStatus := description.ResolvedSuccessStatus()
 	operation.AddResponse(successStatus, success)
-	if description.InputType != nil || len(description.Contract.Inputs) != 0 || len(description.RequestBindings) != 0 {
+	hasInvalidClientRequest := description.InputType != nil || len(description.Contract.Inputs) != 0
+	if len(description.RequestBindings) != 0 {
+		hasInvalidClientRequest = description.HasClientRequestBinding()
+	}
+	if hasInvalidClientRequest {
 		operation.AddResponse(http.StatusBadRequest, errorResponse("Invalid request"))
 	}
 	operation.AddResponse(http.StatusInternalServerError, errorResponse("Internal server error"))
-	if len(requiredScopes) > 0 {
+	if requiresAuthentication {
 		operation.AddResponse(http.StatusUnauthorized, errorResponse("Authentication required"))
+	}
+	if len(requiredScopes) > 0 {
 		operation.AddResponse(http.StatusForbidden, errorResponse("Required OAuth scope not granted"))
 	}
 	statusCodes := make([]int, 0, len(documentation.Responses))
@@ -147,25 +196,44 @@ func renderOperation(
 			}
 		} else {
 			response := errorResponse(responseDescription)
+			if responseDocumentation.GoType != nil {
+				schema, err := responseSchemaForType(generator, schemas, responseDocumentation.GoType)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"koba/openapi: %s response HTTP %d schema: %w",
+						description.MethodName,
+						status,
+						err,
+					)
+				}
+				response = openapi3.NewResponse().WithDescription(responseDescription).WithJSONSchemaRef(schema)
+			}
 			renderResponseHeaders(response, responseDocumentation.Headers)
 			operation.AddResponse(status, response)
 		}
+	}
+	if description.HasWebSocketTransport() {
+		response := operation.Responses.Value(strconv.Itoa(http.StatusSwitchingProtocols))
+		if response == nil || response.Value == nil {
+			return nil, fmt.Errorf("koba/openapi: %s WebSocket response disappeared", description.MethodName)
+		}
+		setWebSocketUpgradeHeaders(response.Value)
 	}
 
 	if documentation.Public {
 		empty := openapi3.SecurityRequirements{}
 		operation.Security = &empty
-	} else if len(requiredScopes) > 0 {
+	} else if requiresAuthentication {
 		effectiveSecurity := documentation.Security
 		if effectiveSecurity == nil {
 			effectiveSecurity = config.DefaultSecurity
 		}
 		if len(effectiveSecurity) == 0 {
-			return nil, fmt.Errorf("koba/openapi: %s requires scopes but has no effective security requirement", description.MethodName)
+			return nil, fmt.Errorf("koba/openapi: %s requires authentication but has no effective security requirement", description.MethodName)
 		}
 		for index, requirement := range effectiveSecurity {
 			if len(requirement) == 0 {
-				return nil, fmt.Errorf("koba/openapi: %s security requirement %d allows anonymous access but RequiredScopes is nonempty", description.MethodName, index+1)
+				return nil, fmt.Errorf("koba/openapi: %s security requirement %d allows anonymous access but authentication is required", description.MethodName, index+1)
 			}
 		}
 		requirements, err := renderSecurityRequirements(effectiveSecurity, knownSecurity)
@@ -184,6 +252,18 @@ func renderOperation(
 		operation.Security = nil
 	}
 	return operation, nil
+}
+
+func operationDescription(description string, requiredScopes []string) string {
+	description = strings.TrimSpace(description)
+	if len(requiredScopes) == 0 {
+		return description
+	}
+	scopes := "Required OAuth scopes: " + strings.Join(requiredScopes, ", ") + "."
+	if description == "" {
+		return scopes
+	}
+	return description + "\n\n" + scopes
 }
 
 func renderOperationParameters(
@@ -214,7 +294,11 @@ func renderOperationParameters(
 		seen[key] = struct{}{}
 
 		parameterDescription := fb.ParameterDocumentation{Name: binding.Name, In: location}
-		if documented, exists := documentation[key]; exists {
+		if binding.Documentation != nil {
+			parameterDescription.Description = binding.Documentation.Description
+			parameterDescription.Deprecated = binding.Documentation.Deprecated
+			parameterDescription.Example = binding.Documentation.Example
+		} else if documented, exists := documentation[key]; exists {
 			parameterDescription = documented
 			// The request binding owns transport identity and all structural
 			// metadata. ParameterDocumentation only enriches it with prose and an
@@ -296,7 +380,7 @@ func requestBodyContractSchema(
 			values = append(values, binding)
 		}
 	}
-	if len(values) == 0 {
+	if len(values) == 0 && len(body.ObjectRules) == 0 {
 		return ref, nil
 	}
 
@@ -309,7 +393,175 @@ func requestBodyContractSchema(
 			return nil, err
 		}
 	}
+	if err := applyBodyObjectRules(root, body.Input.GoType, body.ObjectRules, schemas); err != nil {
+		return nil, err
+	}
 	return root, nil
+}
+
+func applyBodyObjectRules(
+	root *openapi3.SchemaRef,
+	bodyType reflect.Type,
+	rules []fb.ObjectRule,
+	schemas openapi3.Schemas,
+) error {
+	if len(rules) == 0 {
+		return nil
+	}
+	if root == nil || root.Value == nil {
+		return fmt.Errorf("body object rules require a resolved object schema")
+	}
+	for _, rule := range rules {
+		presence := make(openapi3.SchemaRefs, 0, len(rule.Fields()))
+		for _, field := range rule.Fields() {
+			schema, err := objectFieldPresenceSchema(bodyType, field)
+			if err != nil {
+				return err
+			}
+			presence = append(presence, schema)
+		}
+
+		constraint := openapi3.NewObjectSchema()
+		switch rule.Kind() {
+		case fb.ObjectRuleAtLeastOne:
+			constraint.AnyOf = presence
+		case fb.ObjectRuleAllOrNone:
+			all := openapi3.NewObjectSchema()
+			all.AllOf = presence
+			none := openapi3.NewObjectSchema()
+			none.Not = &openapi3.SchemaRef{Value: &openapi3.Schema{AnyOf: presence}}
+			constraint.OneOf = openapi3.SchemaRefs{
+				{Value: all},
+				{Value: none},
+			}
+		case fb.ObjectRuleSameNullState:
+			nullValues := make(openapi3.SchemaRefs, 0, len(rule.Fields()))
+			nonNullValues := make(openapi3.SchemaRefs, 0, len(rule.Fields()))
+			for _, field := range rule.Fields() {
+				nullValue, err := objectFieldStateSchema(root, bodyType, field, true, schemas)
+				if err != nil {
+					return err
+				}
+				nonNullValue, err := objectFieldStateSchema(root, bodyType, field, false, schemas)
+				if err != nil {
+					return err
+				}
+				nullValues = append(nullValues, nullValue)
+				nonNullValues = append(nonNullValues, nonNullValue)
+			}
+			// Absent fields are ignored. A valid object therefore has either no
+			// present null values or no present non-null values. anyOf is
+			// intentional because an object with every field absent satisfies both.
+			noNullValues := openapi3.NewObjectSchema()
+			noNullValues.Not = &openapi3.SchemaRef{Value: &openapi3.Schema{AnyOf: nullValues}}
+			noNonNullValues := openapi3.NewObjectSchema()
+			noNonNullValues.Not = &openapi3.SchemaRef{Value: &openapi3.Schema{AnyOf: nonNullValues}}
+			constraint.AnyOf = openapi3.SchemaRefs{
+				{Value: noNullValues},
+				{Value: noNonNullValues},
+			}
+		default:
+			return fmt.Errorf("unsupported body object rule kind %q", rule.Kind())
+		}
+		root.Value.AllOf = append(root.Value.AllOf, &openapi3.SchemaRef{Value: constraint})
+	}
+	return nil
+}
+
+func objectFieldStateSchema(
+	root *openapi3.SchemaRef,
+	bodyType reflect.Type,
+	fieldPath string,
+	null bool,
+	schemas openapi3.Schemas,
+) (*openapi3.SchemaRef, error) {
+	jsonPath, err := objectFieldJSONPath(bodyType, fieldPath)
+	if err != nil {
+		return nil, err
+	}
+	property, err := objectFieldSchema(root, jsonPath, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("object rule field %q: %w", fieldPath, err)
+	}
+	leaf, err := mutableSchemaRef(property, schemas)
+	if err != nil {
+		return nil, err
+	}
+	leaf.Value.Nullable = null
+	if null {
+		leaf.Value.Enum = []any{nil}
+	}
+	return objectFieldConstraintSchema(bodyType, fieldPath, leaf)
+}
+
+func objectFieldPresenceSchema(bodyType reflect.Type, fieldPath string) (*openapi3.SchemaRef, error) {
+	return objectFieldConstraintSchema(bodyType, fieldPath, nil)
+}
+
+func objectFieldConstraintSchema(
+	bodyType reflect.Type,
+	fieldPath string,
+	leaf *openapi3.SchemaRef,
+) (*openapi3.SchemaRef, error) {
+	jsonPath, err := objectFieldJSONPath(bodyType, fieldPath)
+	if err != nil {
+		return nil, err
+	}
+
+	child := leaf
+	for index := len(jsonPath) - 1; index >= 0; index-- {
+		schema := openapi3.NewObjectSchema()
+		schema.Required = []string{jsonPath[index]}
+		if child != nil {
+			schema.Properties = openapi3.Schemas{jsonPath[index]: child}
+		}
+		child = &openapi3.SchemaRef{Value: schema}
+	}
+	return child, nil
+}
+
+func objectFieldJSONPath(bodyType reflect.Type, fieldPath string) ([]string, error) {
+	current := bodyType
+	jsonPath := make([]string, 0, strings.Count(fieldPath, ".")+1)
+	for _, fieldName := range strings.Split(fieldPath, ".") {
+		for current.Kind() == reflect.Pointer {
+			current = current.Elem()
+		}
+		if current.Kind() != reflect.Struct {
+			return nil, fmt.Errorf("object rule field %q traverses non-struct type %s", fieldPath, current)
+		}
+		field, exists := directOpenAPIField(current, fieldName)
+		if !exists {
+			return nil, fmt.Errorf("object rule field %q does not exist in %s", fieldPath, current)
+		}
+		jsonName, included := openAPIJSONFieldName(field)
+		if !included {
+			return nil, fmt.Errorf("object rule field %q is excluded from JSON", fieldPath)
+		}
+		jsonPath = append(jsonPath, jsonName)
+		current = field.Type
+	}
+	return jsonPath, nil
+}
+
+func objectFieldSchema(
+	root *openapi3.SchemaRef,
+	jsonPath []string,
+	schemas openapi3.Schemas,
+) (*openapi3.SchemaRef, error) {
+	current := root
+	for _, jsonName := range jsonPath {
+		resolved := resolvedSchema(current, schemas)
+		if resolved == nil {
+			return nil, fmt.Errorf("has no resolved schema")
+		}
+		property := resolved.Properties[jsonName]
+		if property == nil {
+			return nil, fmt.Errorf("property %q has no schema", jsonName)
+		}
+		current = property
+	}
+	return current, nil
 }
 
 func applyBodyValueContract(
@@ -362,7 +614,16 @@ func applyBodyValueContract(
 			sort.Strings(current.Required)
 		}
 		if index == len(relative)-1 {
-			current.Properties[jsonName] = contractSchema(property, binding.Input)
+			contracted, contractErr := documentedInputContractSchema(
+				property,
+				binding.Input,
+				binding.Documentation,
+				schemas,
+			)
+			if contractErr != nil {
+				return fmt.Errorf("body value %s: %w", strings.Join(binding.FieldPath, "."), contractErr)
+			}
+			current.Properties[jsonName] = contracted
 			return nil
 		}
 
@@ -416,7 +677,9 @@ func renderResponseHeaders(response *openapi3.Response, documentation map[string
 	if documentation == nil {
 		return
 	}
-	response.Headers = make(openapi3.Headers, len(documentation))
+	if response.Headers == nil {
+		response.Headers = make(openapi3.Headers, len(documentation))
+	}
 	for name, description := range documentation {
 		header := &openapi3.Header{}
 		header.Description = strings.TrimSpace(description.Description)
@@ -469,7 +732,10 @@ func renderParameter(
 	if input == nil {
 		schema = constrainedSchema(schema, description)
 	} else {
-		schema = contractSchema(schema, *input)
+		schema, err = documentedInputContractSchema(schema, *input, nil, schemas)
+		if err != nil {
+			return nil, err
+		}
 	}
 	parameter.Description = strings.TrimSpace(description.Description)
 	parameter.Required = description.Required || description.In == fb.ParameterInPath
@@ -486,6 +752,7 @@ func renderParameter(
 
 func contractSchema(ref *openapi3.SchemaRef, input fb.InputContract) *openapi3.SchemaRef {
 	ref = independentParameterSchema(ref)
+	ref.Value.Nullable = input.Nullable
 	if input.Format != "" {
 		ref.Value.Format = input.Format
 	}
@@ -516,18 +783,76 @@ func contractSchema(ref *openapi3.SchemaRef, input fb.InputContract) *openapi3.S
 		value := *input.MaxLength
 		ref.Value.MaxLength = &value
 	}
+	if input.MinItems != nil {
+		ref.Value.MinItems = *input.MinItems
+	}
+	if input.MaxItems != nil {
+		value := *input.MaxItems
+		ref.Value.MaxItems = &value
+	}
+	if input.UniqueItems {
+		ref.Value.UniqueItems = true
+	}
 	return ref
 }
 
-func hasContractSchemaConstraints(input fb.InputContract) bool {
-	return input.Format != "" ||
-		input.Pattern != "" ||
-		input.Enum != nil ||
-		input.HasDefault ||
-		input.Minimum != nil ||
-		input.Maximum != nil ||
-		input.MinLength != nil ||
-		input.MaxLength != nil
+func documentedContractSchema(
+	ref *openapi3.SchemaRef,
+	input fb.InputContract,
+	documentation *fb.BindingDocumentation,
+) *openapi3.SchemaRef {
+	ref = contractSchema(ref, input)
+	if documentation == nil {
+		return ref
+	}
+	ref.Value.Description = strings.TrimSpace(documentation.Description)
+	ref.Value.Deprecated = documentation.Deprecated
+	if documentation.Example != nil {
+		ref.Value.Example = openAPIScalarValue(documentation.Example)
+	}
+	return ref
+}
+
+// documentedInputContractSchema projects a complete structural contract onto
+// a schema-local copy. Collection element descriptors are recursively applied
+// without mutating shared component schemas.
+func documentedInputContractSchema(
+	ref *openapi3.SchemaRef,
+	input fb.InputContract,
+	documentation *fb.BindingDocumentation,
+	schemas openapi3.Schemas,
+) (*openapi3.SchemaRef, error) {
+	ref = documentedContractSchema(ref, input, documentation)
+	if input.Items == nil {
+		return ref, nil
+	}
+	root, err := mutableSchemaRef(ref, schemas)
+	if err != nil {
+		return nil, err
+	}
+	if root.Value.Items == nil {
+		return nil, fmt.Errorf("collection contract for %s has no item schema", input.GoType)
+	}
+	item, err := mutableSchemaRef(root.Value.Items, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("collection item: %w", err)
+	}
+	item, err = documentedInputContractSchema(
+		item,
+		input.Items.Input,
+		input.Items.Documentation,
+		schemas,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("collection item: %w", err)
+	}
+	for _, binding := range input.Items.Bindings {
+		if err := applyResponseValueContract(item, input.Items.Input.GoType, binding, schemas); err != nil {
+			return nil, fmt.Errorf("collection item field: %w", err)
+		}
+	}
+	root.Value.Items = item
+	return root, nil
 }
 
 func openAPIScalarValue(value any) any {
@@ -541,19 +866,46 @@ func openAPIScalarValue(value any) any {
 	if !reflected.IsValid() {
 		return nil
 	}
-	if reflected.Type().PkgPath() == "" {
-		return reflected.Interface()
-	}
 	switch reflected.Kind() {
+	case reflect.Array, reflect.Slice, reflect.Map, reflect.Struct:
+		// OpenAPI values must use JSON-compatible maps and arrays. Returning a
+		// Go map such as map[string]string is rejected by kin-openapi validation
+		// and does not model the JSON value seen by a transport.
+		encoded, err := json.Marshal(reflected.Interface())
+		if err != nil {
+			return value
+		}
+		var normalized any
+		decoder := json.NewDecoder(bytes.NewReader(encoded))
+		decoder.UseNumber()
+		if err := decoder.Decode(&normalized); err != nil {
+			return value
+		}
+		return normalized
 	case reflect.String:
+		if reflected.Type().PkgPath() == "" {
+			return reflected.Interface()
+		}
 		return reflected.String()
 	case reflect.Bool:
+		if reflected.Type().PkgPath() == "" {
+			return reflected.Interface()
+		}
 		return reflected.Bool()
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if reflected.Type().PkgPath() == "" {
+			return reflected.Interface()
+		}
 		return reflected.Int()
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		if reflected.Type().PkgPath() == "" {
+			return reflected.Interface()
+		}
 		return reflected.Uint()
 	case reflect.Float32, reflect.Float64:
+		if reflected.Type().PkgPath() == "" {
+			return reflected.Interface()
+		}
 		return reflected.Float()
 	default:
 		return value

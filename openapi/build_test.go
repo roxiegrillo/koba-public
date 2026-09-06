@@ -3,10 +3,64 @@ package openapi
 import (
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	fb "github.com/roxiegrillo/koba/v2"
 )
+
+func TestBuildUsesDocumentMetadataOwnedByAPIDocumentation(t *testing.T) {
+	document, err := Build(Config{}, []fb.APIDescription{{
+		Document: &fb.APIDocument{
+			Title:           "Document-owned API",
+			Version:         "2.0.0",
+			Description:     "Owned beside the functional API.",
+			ExternalDocsURL: "https://example.com/docs",
+			Servers: []fb.APIServer{
+				{URL: "/", Description: "Same origin"},
+			},
+			SecuritySchemes: []fb.APISecurityScheme{
+				{Name: "bearerAuth", Type: fb.SecurityTypeHTTP, Scheme: "bearer"},
+			},
+			DefaultSecurity: []fb.SecurityRequirement{{"bearerAuth"}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("Build() returned an error: %v", err)
+	}
+	if got, want := document.Info.Title, "Document-owned API"; got != want {
+		t.Errorf("title = %q, want %q", got, want)
+	}
+	if got, want := document.Info.Version, "2.0.0"; got != want {
+		t.Errorf("version = %q, want %q", got, want)
+	}
+	if len(document.Servers) != 1 || document.Servers[0].URL != "/" {
+		t.Errorf("servers = %#v, want same-origin server", document.Servers)
+	}
+	if document.Components.SecuritySchemes["bearerAuth"] == nil {
+		t.Error("bearerAuth scheme is missing")
+	}
+}
+
+func TestBuildRejectsTwoDocumentMetadataOwners(t *testing.T) {
+	_, err := Build(Config{}, []fb.APIDescription{
+		{Document: &fb.APIDocument{Title: "First", Version: "1.0.0"}},
+		{Document: &fb.APIDocument{Title: "Second", Version: "1.0.0"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "more than one API") {
+		t.Fatalf("Build() error = %v, want duplicate document owner", err)
+	}
+}
+
+func TestBuildRejectsDocumentMetadataInConfigAndAPIDocumentation(t *testing.T) {
+	_, err := Build(Config{Title: "Legacy", Version: "1.0.0"}, []fb.APIDescription{{
+		Document: &fb.APIDocument{Title: "Owned", Version: "1.0.0"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "either APIDocumentation or Config") {
+		t.Fatalf("Build() error = %v, want duplicate source error", err)
+	}
+}
 
 func TestGenerateRendersSchemasParametersSecurityAndStatuses(t *testing.T) {
 	document, err := Generate(Config{

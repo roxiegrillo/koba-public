@@ -1,13 +1,15 @@
 package koba
 
 import (
+	"fmt"
 	"net/http"
 	"reflect"
 )
 
 // OperationDescription is the resolved operation model shared by execution
-// plans and transport renderers. Route, HTTP method, request bindings, and
-// Documentation describe the HTTP adapter around the typed API function.
+// plans and transport renderers. MethodName, OperationID, types, and Contract
+// describe the function boundary; Route, HTTPMethod, and HTTP-specific
+// documentation are populated only for operations exposed through HTTP.
 type OperationDescription struct {
 	MethodName  string
 	OperationID string
@@ -21,7 +23,11 @@ type OperationDescription struct {
 	// descriptor so generated plans never need to serialize user-defined
 	// companion structs.
 	RequestBindings []RequestBinding
-	Documentation   OperationDocumentation
+	// ResponseBindings is the compiled successful-response metadata resolved
+	// from Contract.Response. Renderers consume it without retaining the
+	// caller-defined companion value.
+	ResponseBindings []ResponseBinding
+	Documentation    OperationDocumentation
 }
 
 // BodyBinding returns the binding which supplies the HTTP request body, when
@@ -36,10 +42,43 @@ func (operation OperationDescription) BodyBinding() (RequestBinding, bool) {
 	return RequestBinding{}, false
 }
 
+// HasSubjectBinding reports whether the operation injects the authenticated
+// principal subject into its typed request.
+func (operation OperationDescription) HasSubjectBinding() bool {
+	for _, binding := range operation.RequestBindings {
+		if binding.Source == BindingSourceSubject {
+			return true
+		}
+	}
+	return false
+}
+
+// HasClientRequestBinding reports whether any compiled request field is
+// populated from client-controlled transport input rather than framework
+// authentication context.
+func (operation OperationDescription) HasClientRequestBinding() bool {
+	for _, binding := range operation.RequestBindings {
+		if binding.Source != BindingSourceSubject {
+			return true
+		}
+	}
+	return false
+}
+
+// RequiresAuthentication reports whether execution needs an authenticated
+// principal. A subject binding protects an operation independently from OAuth
+// scope requirements.
+func (operation OperationDescription) RequiresAuthentication() bool {
+	return operation.HasSubjectBinding() || len(operation.ResolvedRequiredScopes()) > 0
+}
+
 // ResolvedSuccessStatus returns the status emitted by the HTTP runtime and
 // documented by OpenAPI. Keeping this rule on the resolved operation prevents
 // reflected and generated applications from drifting.
 func (operation OperationDescription) ResolvedSuccessStatus() int {
+	if operation.HasWebSocketTransport() {
+		return http.StatusSwitchingProtocols
+	}
 	if operation.Documentation.SuccessStatus != 0 {
 		return operation.Documentation.SuccessStatus
 	}
@@ -47,6 +86,27 @@ func (operation OperationDescription) ResolvedSuccessStatus() int {
 		return http.StatusNoContent
 	}
 	return http.StatusOK
+}
+
+// HasWebSocketTransport reports whether the operation establishes an HTTP
+// WebSocket through AcceptWebSocket instead of returning a normal response.
+func (operation OperationDescription) HasWebSocketTransport() bool {
+	return operation.Contract.Transport.WebSocket != nil
+}
+
+// HasKafkaConsumerTransport reports whether Kafka messages, rather than an
+// HTTP request, invoke this operation.
+func (operation OperationDescription) HasKafkaConsumerTransport() bool {
+	return operation.Contract.Transport.KafkaConsumer != nil
+}
+
+// ResolvedKafkaMessageEncoding returns the payload encoding inferred from the
+// Kafka consumer function's input type.
+func (operation OperationDescription) ResolvedKafkaMessageEncoding() (KafkaMessageEncoding, error) {
+	if !operation.HasKafkaConsumerTransport() {
+		return "", fmt.Errorf("koba: %s is not a Kafka consumer operation", operation.MethodName)
+	}
+	return inferKafkaMessageEncoding(operation.InputType)
 }
 
 // ResolvedRequiredScopes returns the operation's transport-neutral scope
@@ -65,6 +125,7 @@ func (operation OperationDescription) ResolvedRequiredScopes() []string {
 type APIDescription struct {
 	Name        string
 	Description string
+	Document    *APIDocument
 	Operations  []OperationDescription
 }
 

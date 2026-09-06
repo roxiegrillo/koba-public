@@ -118,6 +118,16 @@ func TestAddAPIFailsClosedWhenScopedOperationHasNoAuthenticationMiddleware(t *te
 	MakeRawApp().AddApi(&scopedRegistrationAPI{})
 }
 
+func TestAddAPIFailsClosedWhenSubjectOperationHasNoAuthenticationMiddleware(t *testing.T) {
+	defer func() {
+		recovered := recover()
+		if recovered == nil || !strings.Contains(fmt.Sprint(recovered), "no authentication middleware is configured") {
+			t.Fatalf("AddApi() panic = %#v, want missing authentication middleware", recovered)
+		}
+	}()
+	MakeRawApp().AddApi(&subjectAPI{})
+}
+
 func TestAuthenticationOptionAppliesOnlyToScopedOperations(t *testing.T) {
 	authenticationCalls := 0
 	authentication := http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
@@ -160,6 +170,11 @@ func TestAuthorizeOperationRequiresAllScopesWithoutUsingPermissions(t *testing.T
 		wantStatus int
 	}{
 		{name: "missing principal", wantStatus: http.StatusUnauthorized},
+		{
+			name:       "blank subject",
+			principal:  &appmiddleware.Principal{UserID: "  ", Scope: "read:protected write:protected"},
+			wantStatus: http.StatusUnauthorized,
+		},
 		{
 			name:       "missing one required scope",
 			principal:  &appmiddleware.Principal{UserID: "user-1", Scope: "read:protected"},

@@ -8,6 +8,7 @@ require (
 	github.com/emirpasic/gods v1.12.0
 	github.com/getkin/kin-openapi v0.146.0
 	github.com/go-errors/errors v1.4.2
+	github.com/gorilla/websocket v1.5.3
 	github.com/kenshaw/snaker v0.4.2
 	github.com/prometheus/client_golang v1.12.1
 	github.com/prometheus/client_model v0.2.0

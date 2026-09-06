@@ -2,6 +2,7 @@ package koba
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 )
@@ -27,12 +28,35 @@ type Invocation struct {
 // error in reflected and generated plans when a caller omitted that decoder.
 func (invocation Invocation) Decode(target any) error {
 	if invocation.HasInput {
-		return assignInvocationInput(target, invocation.Input)
+		return markInvocationInputError(assignInvocationInput(target, invocation.Input))
 	}
 	if invocation.DecodeBody == nil {
-		return fmt.Errorf("koba: body decoder is not available")
+		return markInvocationInputError(fmt.Errorf("koba: body decoder is not available"))
 	}
-	return invocation.DecodeBody(target)
+	return markInvocationInputError(invocation.DecodeBody(target))
+}
+
+type invocationInputError struct {
+	cause error
+}
+
+func (err *invocationInputError) Error() string { return err.cause.Error() }
+func (err *invocationInputError) Unwrap() error { return err.cause }
+
+func markInvocationInputError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var marked *invocationInputError
+	if errors.As(err, &marked) {
+		return err
+	}
+	return &invocationInputError{cause: err}
+}
+
+func isInvocationInputError(err error) bool {
+	var marked *invocationInputError
+	return errors.As(err, &marked)
 }
 
 func assignInvocationInput(target any, input any) error {
@@ -67,8 +91,11 @@ type InvocationResult struct {
 	HasValue bool
 }
 
-// OperationInvoker invokes one Koba API method. Reflection-backed and
-// generated implementations both satisfy this contract.
+// OperationInvoker invokes one Koba API method. Its error is either a
+// marked input-construction failure from Invocation.Decode or the optional
+// error returned by the API function. Reflection-backed and generated
+// implementations both satisfy this contract. Custom implementations must use
+// Invocation.Decode rather than returning unclassified transport input errors.
 type OperationInvoker func(Invocation) (InvocationResult, error)
 
 // CompiledAPI is the normalized execution plan consumed by transports. The
@@ -124,13 +151,25 @@ func compileReflectedAPI(api any) (CompiledAPI, error) {
 			return CompiledAPI{}, fmt.Errorf("koba: reflected API method disappeared: %s", operation.MethodName)
 		}
 		methodValue := apiValue.MethodByName(operation.MethodName)
-		inputTypes, _ := GetInputOutputTypes(method)
-		compiled.Invokers[operation.MethodName] = reflectedOperationInvoker(inputTypes, methodValue)
+		inputTypes, outputTypes := GetInputOutputTypes(method)
+		results, err := analyzeOperationResults(outputTypes)
+		if err != nil {
+			return CompiledAPI{}, fmt.Errorf("koba: compile %s: %w", operation.MethodName, err)
+		}
+		compiled.Invokers[operation.MethodName] = reflectedOperationInvoker(
+			inputTypes,
+			results.ReturnsError,
+			methodValue,
+		)
 	}
 	return compiled, nil
 }
 
-func reflectedOperationInvoker(inputTypes []reflect.Type, method reflect.Value) OperationInvoker {
+func reflectedOperationInvoker(
+	inputTypes []reflect.Type,
+	returnsError bool,
+	method reflect.Value,
+) OperationInvoker {
 	hasContext := HasContext(inputTypes)
 	return func(invocation Invocation) (InvocationResult, error) {
 		inputs := make([]reflect.Value, 0, len(inputTypes))
@@ -162,6 +201,21 @@ func reflectedOperationInvoker(inputTypes []reflect.Type, method reflect.Value) 
 		}
 
 		outputs := method.Call(inputs)
+		if returnsError {
+			if len(outputs) == 0 {
+				return InvocationResult{}, fmt.Errorf("koba: error-returning operation produced no error result")
+			}
+			output := outputs[len(outputs)-1]
+			if (output.Kind() == reflect.Interface || output.Kind() == reflect.Pointer) && output.IsNil() {
+				outputs = outputs[:len(outputs)-1]
+			} else {
+				failure, ok := output.Interface().(error)
+				if !ok {
+					return InvocationResult{}, fmt.Errorf("koba: operation error result has type %s", output.Type())
+				}
+				return InvocationResult{}, failure
+			}
+		}
 		if len(outputs) == 0 {
 			return InvocationResult{}, nil
 		}
@@ -189,6 +243,12 @@ func validateCompiledAPI(compiled *CompiledAPI) error {
 				operation.MethodName,
 			)
 		}
+		if operation.Contract.Response != nil {
+			return fmt.Errorf(
+				"koba: %s: compiled plans must contain resolved ResponseBindings instead of a response companion",
+				operation.MethodName,
+			)
+		}
 		normalized, err := normalizeOperationContract(operation.Contract)
 		if err != nil {
 			return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
@@ -199,6 +259,11 @@ func validateCompiledAPI(compiled *CompiledAPI) error {
 			return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
 		}
 		operation.RequestBindings = requestBindings
+		responseBindings, err := normalizeResolvedResponseBindings(operation.ResponseBindings, operation.OutputType)
+		if err != nil {
+			return fmt.Errorf("koba: %s: %w", operation.MethodName, err)
+		}
+		operation.ResponseBindings = responseBindings
 		if _, duplicate := known[operation.MethodName]; duplicate {
 			return fmt.Errorf("koba: compiled API contains duplicate method %q", operation.MethodName)
 		}

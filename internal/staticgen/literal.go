@@ -1,6 +1,7 @@
 package staticgen
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -74,6 +75,16 @@ func reflectedLiteral(value reflect.Value) (string, error) {
 		}
 		result.WriteByte('}')
 		return result.String(), nil
+	case reflect.Struct:
+		encoded, err := json.Marshal(value.Interface())
+		if err != nil {
+			return "", fmt.Errorf("marshal example value %s: %w", value.Type(), err)
+		}
+		var jsonValue any
+		if err := json.Unmarshal(encoded, &jsonValue); err != nil {
+			return "", fmt.Errorf("decode example value %s: %w", value.Type(), err)
+		}
+		return reflectedLiteral(reflect.ValueOf(jsonValue))
 	default:
 		return "", fmt.Errorf("example value type %s is not supported; use JSON scalar, list, or string-keyed map values", value.Type())
 	}

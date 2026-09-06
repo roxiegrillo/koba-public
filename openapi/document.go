@@ -12,29 +12,19 @@ import (
 
 const Version = "3.0.3"
 
-// Server describes one public base URL for an API.
-type Server struct {
-	URL         string
-	Description string
-}
+// Server aliases the neutral documentation type retained for Config backward
+// compatibility. New functional APIs normally declare servers in
+// APIDocumentation.Document.
+type Server = fb.APIServer
 
-// SecurityScheme describes a document-level authentication mechanism.
-// ValuePrefix is emitted as x-auth-value-prefix for generators which support
-// API-key values such as "Token <value>".
-type SecurityScheme struct {
-	Name         string
-	Type         string
-	Description  string
-	In           string
-	Parameter    string
-	Scheme       string
-	BearerFormat string
-	ValuePrefix  string
-}
+// SecurityScheme aliases the neutral documentation type retained for Config
+// backward compatibility. New APIs normally declare schemes in
+// APIDocumentation.Document.
+type SecurityScheme = fb.APISecurityScheme
 
 const (
-	SecurityTypeAPIKey = "apiKey"
-	SecurityTypeHTTP   = "http"
+	SecurityTypeAPIKey = fb.SecurityTypeAPIKey
+	SecurityTypeHTTP   = fb.SecurityTypeHTTP
 )
 
 // SecurityRequirement aliases the transport-neutral contract type for
@@ -43,7 +33,8 @@ type SecurityRequirement = fb.SecurityRequirement
 
 // SchemaContext is passed to a project's optional schema customizer. It
 // provides the Go type and struct tag which produced an OpenAPI schema while
-// keeping customization at the adapter boundary.
+// keeping customization at the adapter boundary. Descriptor-derived protobuf
+// socket schemas provide their generated pointer Go type and an empty tag.
 type SchemaContext struct {
 	Name      string
 	GoType    reflect.Type
@@ -51,13 +42,16 @@ type SchemaContext struct {
 	Schema    *openapi3.Schema
 }
 
-// SchemaCustomizer documents project-specific JSON encodings or validation
-// constraints which reflection cannot infer, such as custom marshalers.
+// SchemaCustomizer is the legacy escape hatch for project-specific JSON
+// encodings which reflection and API contracts cannot infer, such as custom
+// marshalers. New APIs should declare field constraints and prose on request
+// and response bindings instead of using a customizer for ordinary schemas.
 type SchemaCustomizer func(SchemaContext) error
 
-// Config contains project-level OpenAPI information. DefaultSecurity defines
-// the AND/OR authentication alternatives for every operation unless its
-// documentation overrides them or marks the operation Public.
+// Config contains adapter and legacy document configuration. New functional
+// APIs should place title, version, servers, schemes, and default security in
+// APIDocumentation.Document. SchemaCustomizer and DisableDefaultProbes remain
+// adapter configuration. A document cannot declare metadata in both places.
 type Config struct {
 	Title            string
 	Version          string
@@ -67,6 +61,10 @@ type Config struct {
 	DefaultSecurity  []SecurityRequirement
 	ExternalDocsURL  string
 	SchemaCustomizer SchemaCustomizer
+	// DisableDefaultProbes omits the framework-owned /healthz and /readyz
+	// operations from build-time OpenAPI generation. Use it together with the
+	// runtime WithoutDefaultProbes option.
+	DisableDefaultProbes bool
 }
 
 // Generate reflects APIs, merges their optional neutral documentation, and
@@ -80,14 +78,24 @@ func Generate(config Config, apis ...any) (*openapi3.T, error) {
 		}
 		descriptions = append(descriptions, description)
 	}
+	if !config.DisableDefaultProbes {
+		descriptions = withDefaultProbeDescriptions(descriptions)
+	}
 	return Build(config, descriptions)
 }
 
 // GenerateFromApp builds a document from the neutral descriptions captured by
-// KobaApp.AddApi.
+// KobaApp.AddApi. Framework probe descriptions are included only when
+// the runtime exposes them through WithOperationalProbes.
 func GenerateFromApp(config Config, app fb.WithAPIDescriptions) (*openapi3.T, error) {
 	if app == nil {
 		return nil, fmt.Errorf("koba/openapi: app is nil")
 	}
-	return Build(config, app.RegisteredAPIDescriptions())
+	descriptions := app.RegisteredAPIDescriptions()
+	operational, exposesProbeState := app.(fb.WithOperationalProbes)
+	includeDefaultProbes := !config.DisableDefaultProbes && exposesProbeState && operational.DefaultProbesEnabled()
+	if includeDefaultProbes {
+		descriptions = withDefaultProbeDescriptions(descriptions)
+	}
+	return Build(config, descriptions)
 }

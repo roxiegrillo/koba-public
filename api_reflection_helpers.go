@@ -80,19 +80,47 @@ func HasContext(types []reflect.Type) bool {
 	return ok
 }
 
-func isPost(inputTypes []reflect.Type, outputTypes []reflect.Type) (bool, error) {
+type operationResultSignature struct {
+	OutputType   reflect.Type
+	ReturnsError bool
+}
+
+var errorType = reflect.TypeFor[error]()
+
+func analyzeOperationResults(outputTypes []reflect.Type) (operationResultSignature, error) {
+	switch len(outputTypes) {
+	case 0:
+		return operationResultSignature{}, nil
+	case 1:
+		if outputTypes[0] == errorType {
+			return operationResultSignature{ReturnsError: true}, nil
+		}
+		return operationResultSignature{OutputType: outputTypes[0]}, nil
+	case 2:
+		if outputTypes[0] == errorType {
+			return operationResultSignature{}, stderr.New("the response value cannot be error when another result follows")
+		}
+		if outputTypes[1] != errorType {
+			return operationResultSignature{}, stderr.New("the second result must be error")
+		}
+		return operationResultSignature{OutputType: outputTypes[0], ReturnsError: true}, nil
+	default:
+		return operationResultSignature{}, stderr.New("an operation may return only a response value followed by an optional error")
+	}
+}
+
+func isPost(inputTypes []reflect.Type) (bool, error) {
 	hasCtx := HasContext(inputTypes)
 	numIn := len(inputTypes)
-	numOut := len(outputTypes)
 	base := 0
 	if hasCtx {
 		base = 1
 	}
-	if numIn == (base+1) && (numOut == 0 || numOut == 1) {
+	if numIn == base+1 {
 		return true, nil
-	} else if numIn == (base) && (numOut == 0 || numOut == 1) {
+	} else if numIn == base {
 		return false, nil
 	} else {
-		return false, stderr.New("Invalid args")
+		return false, stderr.New("an operation accepts at most one request value after an optional context.Context")
 	}
 }

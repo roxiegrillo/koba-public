@@ -39,6 +39,9 @@ func (a *AuthMiddleware) validateClaims(ctx context.Context, tokenString string)
 	if !ok || claims == nil {
 		return Principal{}, nil, fmt.Errorf("invalid token claims")
 	}
+	if claims.RegisteredClaims.Expiry == 0 {
+		return Principal{}, nil, fmt.Errorf("token expiration is required")
+	}
 	userID := strings.TrimSpace(claims.RegisteredClaims.Subject)
 	if userID == "" {
 		return Principal{}, nil, fmt.Errorf("token subject is required")
@@ -60,14 +63,29 @@ func (a *AuthMiddleware) validateClaims(ctx context.Context, tokenString string)
 // ValidateRequest extracts and validates the JWT from an HTTP request's Authorization header
 // Use this when you receive an HTTP request and need to validate the user
 func (a *AuthMiddleware) ValidateRequest(r *http.Request) (*UserInfo, error) {
-	tokenString, err := jwtmiddleware.AuthHeaderTokenExtractor(r)
+	tokenString, present, err := authorizationHeaderToken(r)
 	if err != nil {
 		return nil, err
 	}
-	if tokenString == "" {
+	if !present || tokenString == "" {
 		return nil, fmt.Errorf("missing authorization header")
 	}
 	return a.ValidateToken(r.Context(), tokenString)
+}
+
+func authorizationHeaderToken(r *http.Request) (token string, present bool, err error) {
+	if r == nil {
+		return "", false, fmt.Errorf("request is required")
+	}
+	values := r.Header.Values("Authorization")
+	if len(values) == 0 {
+		return "", false, nil
+	}
+	if len(values) != 1 {
+		return "", true, fmt.Errorf("multiple authorization headers are not allowed")
+	}
+	token, err = jwtmiddleware.AuthHeaderTokenExtractor(r)
+	return token, true, err
 }
 
 // IsAuthenticated checks if the request has a valid JWT token
